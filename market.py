@@ -16,6 +16,14 @@ SECTORS = {
 MARKET_EVENT_CHANCE = 0.08
 ASSET_EVENT_CHANCE = 0.025
 
+
+def append_news(market: dict | None, message: str, symbol: str = "MARKET", category: str = "Market") -> None:
+    if market is None:
+        return
+    feed = market.setdefault("news_feed", [])
+    feed.append({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "symbol": symbol, "category": category, "message": message})
+    del feed[:-120]
+
 def asset(symbol: str, name: str, category: str, price: float, volatility: float, trend: float, sector: str | None = None) -> dict:
     return {
         "symbol": symbol,
@@ -84,7 +92,7 @@ def generate_market() -> list[dict]:
     return known + generated
 
 
-def add_event(item: dict, message: str, momentum: float, duration: int, volatility_boost: float = 0.0) -> None:
+def add_event(item: dict, message: str, momentum: float, duration: int, volatility_boost: float = 0.0, market: dict | None = None) -> None:
     item["news"] = message
     item["event_momentum"] = momentum
     item["event_momentum_ticks"] = duration
@@ -93,10 +101,11 @@ def add_event(item: dict, message: str, momentum: float, duration: int, volatili
     log = item.setdefault("event_log", [])
     log.append({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "message": message})
     del log[:-8]
+    append_news(market, message, item.get("symbol", "MARKET"), item.get("category", "Market"))
 
 
-def maybe_asset_event(item: dict) -> None:
-    if item.get("event_cooldown", 0) > 0 or random.random() > ASSET_EVENT_CHANCE:
+def maybe_asset_event(item: dict, market: dict, event_frequency: float) -> None:
+    if item.get("event_cooldown", 0) > 0 or random.random() > ASSET_EVENT_CHANCE * event_frequency:
         return
 
     category = item.get("category", "Stock")
@@ -105,6 +114,7 @@ def maybe_asset_event(item: dict) -> None:
         (f"{symbol} reports stronger earnings than expected", 0.035, 8, 0.006),
         (f"{symbol} misses revenue targets and cuts guidance", -0.045, 9, 0.009),
         (f"{symbol} launches a major new product line", 0.028, 7, 0.005),
+        (f"{symbol} declares a special dividend for long-term holders", 0.018, 5, 0.003),
         (f"{symbol} faces a surprise lawsuit from a competitor", -0.035, 7, 0.008),
         (f"{symbol} announces cost cuts and margin improvements", 0.018, 6, 0.004),
         (f"Analysts upgrade {symbol} after institutional buying", 0.022, 5, 0.004),
@@ -139,11 +149,11 @@ def maybe_asset_event(item: dict) -> None:
         "Fund": fund_events,
     }.get(category, stock_events)
     message, momentum, duration, volatility_boost = random.choice(event_pool)
-    add_event(item, message, momentum, duration, volatility_boost)
+    add_event(item, message, momentum, duration, volatility_boost, market)
 
 
-def maybe_market_event(market: dict) -> None:
-    if random.random() > MARKET_EVENT_CHANCE:
+def maybe_market_event(market: dict, event_frequency: float) -> None:
+    if random.random() > MARKET_EVENT_CHANCE * event_frequency:
         return
 
     assets = market.get("assets", [])
@@ -178,17 +188,21 @@ def maybe_market_event(market: dict) -> None:
     template, momentum, duration, volatility_boost = random.choice(market_events)
     message = template.format(label=label)
     market["latest_event"] = message
+    append_news(market, message)
     for item in candidates:
-        add_event(item, message, momentum * random.uniform(0.6, 1.25), duration, volatility_boost)
+        add_event(item, message, momentum * random.uniform(0.6, 1.25), duration, volatility_boost, market)
 
 
 def advance_market(market: dict, ticks: int = 1) -> None:
+    settings = market.setdefault("settings", {})
+    volatility_multiplier = float(settings.get("volatility_multiplier", 1.0))
+    event_frequency = float(settings.get("event_frequency", 1.0))
     for _ in range(max(1, ticks)):
-        maybe_market_event(market)
+        maybe_market_event(market, event_frequency)
         for item in market["assets"]:
             item.setdefault("sector", random.choice(SECTORS.get(item.get("category", "Stock"), ["General"])))
             item["event_cooldown"] = max(0, item.get("event_cooldown", 0) - 1)
-            maybe_asset_event(item)
+            maybe_asset_event(item, market, event_frequency)
 
             momentum = item.get("event_momentum", 0.0) if item.get("event_momentum_ticks", 0) > 0 else 0.0
             if item.get("event_momentum_ticks", 0) > 0:
@@ -198,7 +212,7 @@ def advance_market(market: dict, ticks: int = 1) -> None:
             if temp_volatility:
                 item["temporary_volatility"] = max(0.0, temp_volatility * 0.75)
 
-            volatility = item.get("volatility", 0.03) + temp_volatility
+            volatility = (item.get("volatility", 0.03) + temp_volatility) * volatility_multiplier
             shock = random.gauss(item.get("trend", 0) + momentum, volatility)
             cycle = math.sin(time.time() / 40 + len(item["symbol"])) * 0.006
             new_price = max(0.25, item["price"] * (1 + shock + cycle))
@@ -210,4 +224,3 @@ def advance_market(market: dict, ticks: int = 1) -> None:
                 direction = "rallies" if shock > 0 else "slides"
                 item["news"] = f"{item['symbol']} {direction} after heavy trading"
     market["last_tick"] = time.time()
-

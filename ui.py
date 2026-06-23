@@ -2,13 +2,23 @@ from __future__ import annotations
 
 import platform
 import time
-from tkinter import BOTH, END, LEFT, RIGHT, X, Y, BooleanVar, Canvas, Listbox, StringVar, Tk, messagebox
+from tkinter import BOTH, END, LEFT, RIGHT, X, Y, BooleanVar, Canvas, Listbox, StringVar, Tk, messagebox, simpledialog
 from tkinter import ttk
 
 from config import APP_SETTINGS_FILE, CHART_RANGES, DATA_DIR, MARKET_FILE, STARTING_CURRENCY, USERS_FILE, money
 from i18n import LANGUAGES, THEMES, TRANSLATIONS
 from market import advance_market, generate_market
-from storage import Session, create_user_record, ensure_data_dir, load_json, save_json, verify_password
+from storage import (
+    Session,
+    create_user_record,
+    ensure_data_dir,
+    hash_password,
+    load_json,
+    normalize_market_data,
+    normalize_users_data,
+    save_json,
+    verify_password,
+)
 
 class VirtualStockMarketApp:
     def __init__(self, root: Tk) -> None:
@@ -22,6 +32,14 @@ class VirtualStockMarketApp:
         self.live_updates_enabled = False
         self.live_update_job: str | None = None
         self.live_interval_seconds = StringVar(value="3")
+        self.speed_preset = StringVar(value="Normal")
+        self.volatility_multiplier = StringVar(value="1.0")
+        self.event_frequency = StringVar(value="1.0")
+        self.news_filter = StringVar(value="All")
+        self.order_type = StringVar(value="Limit Buy")
+        self.order_symbol = StringVar()
+        self.order_quantity = StringVar(value="1")
+        self.order_price = StringVar(value="10")
         self.language = StringVar(value="English")
         self.dark_mode = BooleanVar(value=False)
         self.live_button_text = StringVar(value="")
@@ -53,12 +71,89 @@ class VirtualStockMarketApp:
         style.configure(".", background=colors["bg"], foreground=colors["text"])
         style.configure("TFrame", background=colors["bg"])
         style.configure("TLabel", background=colors["bg"], foreground=colors["text"])
-        style.configure("TButton", padding=6)
+        style.configure("TButton", padding=6, background=colors["panel"], foreground=colors["text"], bordercolor=colors["border"])
+        style.map(
+            "TButton",
+            background=[
+                ("disabled", colors["panel"]),
+                ("pressed", colors["pressed_bg"]),
+                ("active", colors["hover_bg"]),
+            ],
+            foreground=[
+                ("disabled", colors["muted"]),
+                ("pressed", colors["select_fg"]),
+                ("active", colors["text"]),
+            ],
+            bordercolor=[("active", colors["select_bg"]), ("pressed", colors["select_bg"])],
+        )
         style.configure("TCheckbutton", background=colors["bg"], foreground=colors["text"])
+        style.map(
+            "TCheckbutton",
+            background=[("active", colors["hover_bg"]), ("pressed", colors["pressed_bg"]), ("selected", colors["bg"])],
+            foreground=[("active", colors["text"]), ("pressed", colors["select_fg"]), ("disabled", colors["muted"])],
+        )
         style.configure("TRadiobutton", background=colors["bg"], foreground=colors["text"])
+        style.map(
+            "TRadiobutton",
+            background=[("active", colors["hover_bg"]), ("pressed", colors["pressed_bg"]), ("selected", colors["bg"])],
+            foreground=[("active", colors["text"]), ("pressed", colors["select_fg"]), ("disabled", colors["muted"])],
+        )
+        style.configure(
+            "TEntry",
+            fieldbackground=colors["field_bg"],
+            foreground=colors["field_fg"],
+            insertcolor=colors["field_fg"],
+            bordercolor=colors["border"],
+            lightcolor=colors["border"],
+            darkcolor=colors["border"],
+        )
+        style.map(
+            "TEntry",
+            fieldbackground=[("disabled", colors["panel"]), ("readonly", colors["field_bg"]), ("focus", colors["field_bg"])],
+            foreground=[("disabled", colors["muted"]), ("readonly", colors["field_fg"]), ("focus", colors["field_fg"])],
+            selectbackground=[("focus", colors["field_select_bg"])],
+            selectforeground=[("focus", colors["field_select_fg"])],
+        )
+        style.configure(
+            "TCombobox",
+            fieldbackground=colors["field_bg"],
+            background=colors["field_bg"],
+            foreground=colors["field_fg"],
+            arrowcolor=colors["field_fg"],
+            bordercolor=colors["border"],
+            lightcolor=colors["border"],
+            darkcolor=colors["border"],
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[
+                ("active", colors["field_bg"]),
+                ("readonly", colors["field_bg"]),
+                ("focus", colors["field_bg"]),
+                ("disabled", colors["panel"]),
+            ],
+            background=[("active", colors["hover_bg"]), ("pressed", colors["pressed_bg"])],
+            foreground=[
+                ("active", colors["field_fg"]),
+                ("readonly", colors["field_fg"]),
+                ("focus", colors["field_fg"]),
+                ("disabled", colors["muted"]),
+            ],
+            selectbackground=[("readonly", colors["field_select_bg"]), ("focus", colors["field_select_bg"])],
+            selectforeground=[("readonly", colors["field_select_fg"]), ("focus", colors["field_select_fg"])],
+            arrowcolor=[("disabled", colors["muted"]), ("active", colors["field_fg"]), ("readonly", colors["field_fg"])],
+        )
         style.configure("TNotebook", background=colors["bg"], borderwidth=0)
         style.configure("TNotebook.Tab", padding=(12, 6), background=colors["panel"], foreground=colors["text"])
-        style.map("TNotebook.Tab", background=[("selected", colors["select_bg"])], foreground=[("selected", colors["select_fg"])])
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", colors["select_bg"]), ("active", colors["hover_bg"])],
+            foreground=[("selected", colors["select_fg"]), ("active", colors["text"])],
+        )
+        self.root.option_add("*TCombobox*Listbox.background", colors["field_bg"])
+        self.root.option_add("*TCombobox*Listbox.foreground", colors["field_fg"])
+        self.root.option_add("*TCombobox*Listbox.selectBackground", colors["field_select_bg"])
+        self.root.option_add("*TCombobox*Listbox.selectForeground", colors["field_select_fg"])
         try:
             self.root.configure(background=colors["bg"])
         except Exception:
@@ -145,10 +240,10 @@ class VirtualStockMarketApp:
         ttk.Label(card, text=self.tr("local_files"), foreground=self.colors()["muted"]).pack(pady=(18, 0))
 
     def load_session(self, username: str) -> Session:
-        market = load_json(MARKET_FILE, {"last_tick": time.time(), "assets": generate_market()})
+        market = normalize_market_data(load_json(MARKET_FILE, {"last_tick": time.time(), "assets": generate_market()}))
         elapsed = int((time.time() - market.get("last_tick", time.time())) // 15)
         advance_market(market, ticks=min(max(elapsed, 1), 10))
-        users = load_json(USERS_FILE, {"users": {}})
+        users = normalize_users_data(load_json(USERS_FILE, {"users": {}}))
         return Session(username=username, users_data=users, market_data=market)
 
     def register(self, username: str, password: str) -> None:
@@ -200,6 +295,9 @@ class VirtualStockMarketApp:
             self.live_update_job = None
         self.apply_theme()
         self.root.title(self.tr("app_title"))
+        market_settings = self.session.market_data.setdefault("settings", {})
+        self.volatility_multiplier.set(f"{float(market_settings.get('volatility_multiplier', 1.0)):g}")
+        self.event_frequency.set(f"{float(market_settings.get('event_frequency', 1.0)):g}")
         self.clear()
         self.root.columnconfigure(0, weight=0)
         self.root.columnconfigure(1, weight=1)
@@ -233,10 +331,25 @@ class VirtualStockMarketApp:
         notebook.grid(row=0, column=0, sticky="nsew")
         market_tab = ttk.Frame(notebook, padding=14)
         settings_tab = ttk.Frame(notebook, padding=14)
+        history_tab = ttk.Frame(notebook, padding=14)
+        performance_tab = ttk.Frame(notebook, padding=14)
+        orders_tab = ttk.Frame(notebook, padding=14)
+        news_tab = ttk.Frame(notebook, padding=14)
+        leaderboard_tab = ttk.Frame(notebook, padding=14)
         market_tab.rowconfigure(2, weight=1)
         market_tab.columnconfigure(0, weight=1)
         notebook.add(market_tab, text=self.with_icon("📈", "market"))
+        notebook.add(performance_tab, text=self.with_icon("📊", "performance"))
+        notebook.add(history_tab, text=self.with_icon("🧾", "history"))
+        notebook.add(orders_tab, text=self.with_icon("⏱", "orders"))
+        notebook.add(news_tab, text=self.with_icon("📰", "news"))
+        notebook.add(leaderboard_tab, text=self.with_icon("🏆", "leaderboard"))
         notebook.add(settings_tab, text=self.with_icon("⚙", "settings"))
+        self.build_performance_tab(performance_tab)
+        self.build_history_tab(history_tab)
+        self.build_orders_tab(orders_tab)
+        self.build_news_tab(news_tab)
+        self.build_leaderboard_tab(leaderboard_tab)
         self.build_settings_tab(settings_tab)
 
         filters = ttk.Frame(market_tab)
@@ -309,10 +422,67 @@ class VirtualStockMarketApp:
         self.portfolio_list.bind("<Double-Button-1>", self.on_portfolio_double_click)
 
         self.refresh_all()
+        self.bind_shortcuts()
+        self.maybe_show_tutorial()
         if start_live:
             self.start_live_updates()
         else:
             self.stop_live_updates()
+
+    def build_performance_tab(self, parent) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+        ttk.Label(parent, text=self.tr("portfolio_performance"), font=("Arial", 20, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        self.performance_chart = Canvas(parent, height=320, background=self.colors()["bg"], highlightthickness=1, highlightbackground=self.colors()["border"])
+        self.performance_chart.grid(row=1, column=0, sticky="nsew")
+
+    def build_history_tab(self, parent) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+        ttk.Label(parent, text=self.tr("transaction_history"), font=("Arial", 20, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        self.transaction_list = Listbox(parent, height=18, exportselection=False)
+        self.configure_listbox(self.transaction_list)
+        self.transaction_list.grid(row=1, column=0, sticky="nsew")
+
+    def build_orders_tab(self, parent) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(2, weight=1)
+        form = ttk.Frame(parent)
+        form.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        ttk.Label(form, text=self.tr("order_type")).pack(side=LEFT)
+        ttk.Combobox(form, textvariable=self.order_type, values=["Limit Buy", "Limit Sell", "Stop Loss"], state="readonly", width=12).pack(side=LEFT, padx=6)
+        ttk.Label(form, text=self.tr("symbol")).pack(side=LEFT)
+        ttk.Entry(form, textvariable=self.order_symbol, width=10).pack(side=LEFT, padx=6)
+        ttk.Label(form, text=self.tr("qty")).pack(side=LEFT)
+        ttk.Entry(form, textvariable=self.order_quantity, width=8).pack(side=LEFT, padx=6)
+        ttk.Label(form, text=self.tr("price")).pack(side=LEFT)
+        ttk.Entry(form, textvariable=self.order_price, width=10).pack(side=LEFT, padx=6)
+        ttk.Button(form, text=self.with_icon("＋", "place_order"), command=self.place_order).pack(side=LEFT, padx=8)
+        ttk.Button(form, text=self.with_icon("✕", "cancel_selected"), command=self.cancel_selected_order).pack(side=LEFT)
+        ttk.Label(parent, text=self.tr("order_help")).grid(row=1, column=0, sticky="w", pady=(0, 8))
+        self.orders_list = Listbox(parent, height=16, exportselection=False)
+        self.configure_listbox(self.orders_list)
+        self.orders_list.grid(row=2, column=0, sticky="nsew")
+
+    def build_news_tab(self, parent) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+        controls = ttk.Frame(parent)
+        controls.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        ttk.Label(controls, text=self.tr("filter")).pack(side=LEFT)
+        ttk.Combobox(controls, textvariable=self.news_filter, values=["All", "Market", "Stock", "Crypto", "FNT", "Commodity", "Fund"], state="readonly", width=14).pack(side=LEFT, padx=6)
+        ttk.Button(controls, text=self.with_icon("↻", "refresh"), command=self.refresh_news).pack(side=LEFT)
+        self.news_list = Listbox(parent, height=18, exportselection=False)
+        self.configure_listbox(self.news_list)
+        self.news_list.grid(row=1, column=0, sticky="nsew")
+
+    def build_leaderboard_tab(self, parent) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+        ttk.Label(parent, text=self.tr("local_leaderboard"), font=("Arial", 20, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        self.leaderboard_list = Listbox(parent, height=18, exportselection=False)
+        self.configure_listbox(self.leaderboard_list)
+        self.leaderboard_list.grid(row=1, column=0, sticky="nsew")
 
     def build_settings_tab(self, parent) -> None:
         parent.columnconfigure(0, weight=1)
@@ -320,6 +490,8 @@ class VirtualStockMarketApp:
         account_box.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         ttk.Label(account_box, text=f"{self.tr('username')}: {self.session.username}", font=("Arial", 12, "bold")).pack(anchor="w")
         ttk.Label(account_box, text=f"{self.tr('created')}: {self.session.user.get('created_at', 'Unknown')}").pack(anchor="w", pady=(4, 0))
+        ttk.Button(account_box, text=self.with_icon("🔑", "change_password"), command=self.change_password).pack(anchor="w", pady=(10, 0))
+        ttk.Button(account_box, text=self.with_icon("🗑", "delete_account"), command=self.delete_account).pack(anchor="w", pady=(4, 0))
 
         appearance_box = ttk.LabelFrame(parent, text=self.tr("appearance"), padding=14)
         appearance_box.grid(row=1, column=0, sticky="ew", pady=(0, 12))
@@ -340,12 +512,81 @@ class VirtualStockMarketApp:
         ).pack(anchor="w")
         ttk.Label(system_box, text=f"Data: {DATA_DIR}", foreground=self.colors()["muted"]).pack(anchor="w", pady=(4, 0))
 
+        simulation_box = ttk.LabelFrame(parent, text=self.tr("simulation"), padding=14)
+        simulation_box.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+        ttk.Label(simulation_box, text=self.tr("speed_preset")).pack(anchor="w")
+        ttk.Combobox(simulation_box, textvariable=self.speed_preset, values=["Slow", "Normal", "Fast", "Very Fast"], state="readonly", width=16).pack(anchor="w", pady=(2, 8))
+        ttk.Label(simulation_box, text=self.tr("volatility_multiplier")).pack(anchor="w")
+        ttk.Entry(simulation_box, textvariable=self.volatility_multiplier, width=10).pack(anchor="w", pady=(2, 8))
+        ttk.Label(simulation_box, text=self.tr("event_frequency")).pack(anchor="w")
+        ttk.Entry(simulation_box, textvariable=self.event_frequency, width=10).pack(anchor="w", pady=(2, 8))
+        ttk.Button(simulation_box, text=self.with_icon("✓", "apply_simulation_settings"), command=self.apply_simulation_settings).pack(anchor="w")
+
     def apply_settings_change(self) -> None:
         was_live = self.live_updates_enabled
         self.save_user_preferences()
         self.apply_theme()
         self.status.set(self.tr("saved"))
         self.show_dashboard(start_live=was_live)
+
+    def maybe_show_tutorial(self) -> None:
+        settings = self.ensure_user_settings()
+        if settings.get("tutorial_seen"):
+            return
+        settings["tutorial_seen"] = True
+        self.session.save()
+        messagebox.showinfo(
+            self.tr("quick_start"),
+            self.tr("quick_start_body"),
+        )
+
+    def apply_simulation_settings(self) -> None:
+        presets = {"Slow": "8", "Normal": "3", "Fast": "1", "Very Fast": "0.5"}
+        self.live_interval_seconds.set(presets.get(self.speed_preset.get(), self.live_interval_seconds.get()))
+        try:
+            volatility = min(max(float(self.volatility_multiplier.get()), 0.2), 3.0)
+            frequency = min(max(float(self.event_frequency.get()), 0.1), 5.0)
+        except ValueError:
+            messagebox.showerror("Invalid settings", "Use numeric values for volatility and event frequency.")
+            return
+        settings = self.session.market_data.setdefault("settings", {})
+        settings["volatility_multiplier"] = volatility
+        settings["event_frequency"] = frequency
+        self.volatility_multiplier.set(f"{volatility:g}")
+        self.event_frequency.set(f"{frequency:g}")
+        self.apply_live_speed()
+        self.session.save()
+        self.status.set("Simulation settings updated.")
+
+    def change_password(self) -> None:
+        current = simpledialog.askstring("Change Password", "Current password:", show="*")
+        if current is None:
+            return
+        if not verify_password(current, self.session.user):
+            messagebox.showerror("Password unchanged", "Current password is incorrect.")
+            return
+        new_password = simpledialog.askstring("Change Password", "New password:", show="*")
+        if not new_password:
+            return
+        if len(new_password) < 4:
+            messagebox.showerror("Password unchanged", "Use a password with at least 4 characters.")
+            return
+        salt, digest = hash_password(new_password)
+        self.session.user["password_salt"] = salt
+        self.session.user["password_hash"] = digest
+        self.session.save()
+        self.status.set("Password changed.")
+
+    def delete_account(self) -> None:
+        if not messagebox.askyesno("Delete Account", "Delete this account and return to the login screen? This cannot be undone."):
+            return
+        username = self.session.username
+        self.stop_live_updates()
+        self.session.users_data.get("users", {}).pop(username, None)
+        self.session.save()
+        self.session = None
+        self.status.set("Account deleted.")
+        self.show_login()
 
     def logout(self) -> None:
         self.stop_live_updates()
@@ -354,6 +595,13 @@ class VirtualStockMarketApp:
         self.session = None
         self.status.set("Logged out.")
         self.show_login()
+
+    def bind_shortcuts(self) -> None:
+        self.root.bind("<Control-b>", lambda _event: self.buy_selected())
+        self.root.bind("<Control-s>", lambda _event: self.sell_selected())
+        self.root.bind("<Control-r>", lambda _event: self.refresh_all())
+        self.root.bind("<Control-l>", lambda _event: self.logout())
+        self.root.bind("<space>", lambda _event: self.toggle_live_updates())
 
     def get_assets(self) -> list[dict]:
         assert self.session is not None
@@ -366,11 +614,17 @@ class VirtualStockMarketApp:
     def refresh_all(self) -> None:
         if not self.session:
             return
+        self.record_net_worth_snapshot()
         self.session.save()
         self.refresh_account()
         self.refresh_market_list()
         self.refresh_portfolio()
         self.render_selected()
+        self.refresh_transactions()
+        self.refresh_performance()
+        self.refresh_orders()
+        self.refresh_news()
+        self.refresh_leaderboard()
 
     def refresh_account(self) -> None:
         user = self.session.user
@@ -427,6 +681,109 @@ class VirtualStockMarketApp:
                 self.portfolio_symbols.append(symbol)
                 self.portfolio_list.insert(END, f"{symbol:<6} {qty:>8.3f} units   value {money(qty * item['price'])}")
 
+    def refresh_transactions(self) -> None:
+        if not hasattr(self, "transaction_list"):
+            return
+        self.transaction_list.delete(0, END)
+        transactions = self.session.user.get("transactions", [])
+        if not transactions:
+            self.transaction_list.insert(END, self.tr("no_transactions"))
+            return
+        for txn in reversed(transactions[-150:]):
+            total = txn.get("quantity", 0) * txn.get("price", 0)
+            self.transaction_list.insert(
+                END,
+                f"{txn.get('time', '')}  {txn.get('action', ''):<10} {txn.get('symbol', ''):<6} "
+                f"{txn.get('quantity', 0):>8.3f} @ {money(txn.get('price', 0))} = {money(total)}",
+            )
+
+    def refresh_orders(self) -> None:
+        if not hasattr(self, "orders_list"):
+            return
+        self.orders_list.delete(0, END)
+        orders = self.session.user.get("orders", [])
+        if not orders:
+            self.orders_list.insert(END, self.tr("no_active_orders"))
+            return
+        for order in orders:
+            self.orders_list.insert(
+                END,
+                f"{order.get('created_at', '')}  {order.get('type', ''):<10} {order.get('symbol', ''):<6} "
+                f"{order.get('quantity', 0):>8.3f} target {money(order.get('target_price', 0))}",
+            )
+
+    def refresh_news(self) -> None:
+        if not hasattr(self, "news_list"):
+            return
+        self.news_list.delete(0, END)
+        news_filter = self.news_filter.get()
+        feed = self.session.market_data.get("news_feed", [])
+        visible = [event for event in reversed(feed) if news_filter == "All" or event.get("category") == news_filter]
+        if not visible:
+            self.news_list.insert(END, self.tr("no_matching_news"))
+            return
+        for event in visible[:120]:
+            self.news_list.insert(END, f"{event.get('time', '')}  {event.get('symbol', ''):<6}  {event.get('message', '')}")
+
+    def refresh_leaderboard(self) -> None:
+        if not hasattr(self, "leaderboard_list"):
+            return
+        self.leaderboard_list.delete(0, END)
+        rows = []
+        for username, record in self.session.users_data.get("users", {}).items():
+            cash = record.get("cash", 0)
+            holdings_value = 0.0
+            for symbol, qty in record.get("portfolio", {}).items():
+                item = next((asset_item for asset_item in self.get_assets() if asset_item["symbol"] == symbol), None)
+                if item:
+                    holdings_value += qty * item["price"]
+            rows.append((cash + holdings_value, username, cash, holdings_value))
+        for rank, (net_worth, username, cash, holdings_value) in enumerate(sorted(rows, reverse=True), start=1):
+            self.leaderboard_list.insert(END, f"#{rank:<3} {username:<18} net {money(net_worth):>12}  cash {money(cash):>12}  holdings {money(holdings_value):>12}")
+
+    def record_net_worth_snapshot(self) -> None:
+        user = self.session.user
+        holdings_value = 0.0
+        for symbol, qty in user.get("portfolio", {}).items():
+            item = next((asset_item for asset_item in self.get_assets() if asset_item["symbol"] == symbol), None)
+            if item:
+                holdings_value += item["price"] * qty
+        history = user.setdefault("net_worth_history", [])
+        value = round(user.get("cash", 0) + holdings_value, 2)
+        if not history or history[-1].get("value") != value:
+            history.append({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "value": value})
+            del history[:-300]
+
+    def refresh_performance(self) -> None:
+        if not hasattr(self, "performance_chart"):
+            return
+        chart = self.performance_chart
+        chart.delete("all")
+        colors = self.colors()
+        width = max(chart.winfo_width(), 620)
+        height = 320
+        pad = 34
+        chart.create_rectangle(0, 0, width, height, fill=colors["bg"], outline=colors["border"])
+        history = self.session.user.get("net_worth_history", [])
+        if len(history) < 2:
+            chart.create_text(width / 2, height / 2, text="More account changes are needed for a performance chart.", fill=colors["muted"])
+            return
+        values = [point["value"] for point in history[-120:]]
+        low, high = min(values), max(values)
+        if low == high:
+            low -= 1
+            high += 1
+        chart.create_text(pad, pad, anchor="w", text=f"High {money(high)}", fill=colors["muted"])
+        chart.create_text(pad, height - pad, anchor="w", text=f"Low {money(low)}", fill=colors["muted"])
+        chart.create_line(pad, height - pad, width - pad, height - pad, fill=colors["border"])
+        chart.create_line(pad, pad, pad, height - pad, fill=colors["border"])
+        points = []
+        for index, value in enumerate(values):
+            x = pad + index * (width - pad * 2) / (len(values) - 1)
+            y = height - pad - (value - low) * (height - pad * 2) / (high - low)
+            points.extend([x, y])
+        chart.create_line(*points, fill="#22c55e" if values[-1] >= values[0] else "#ef4444", width=3, smooth=True)
+
     def on_select_asset(self, _event=None) -> None:
         source = _event.widget if _event else self.market_list
         selection = source.curselection()
@@ -438,6 +795,7 @@ class VirtualStockMarketApp:
         self.market_change_list.selection_set(selection[0])
         asset_item = self.visible_assets[selection[0]]
         self.selected_symbol.set(asset_item["symbol"])
+        self.order_symbol.set(asset_item["symbol"])
         self.render_selected()
 
     def scroll_market_lists(self, *args) -> None:
@@ -466,6 +824,91 @@ class VirtualStockMarketApp:
         self.refresh_market_list()
         self.render_selected()
         self.status.set(f"Selected {symbol} from your portfolio.")
+
+    def place_order(self) -> None:
+        symbol = self.order_symbol.get().strip().upper() or self.selected_symbol.get()
+        item = next((asset_item for asset_item in self.get_assets() if asset_item["symbol"] == symbol), None)
+        if not item:
+            messagebox.showerror("Order rejected", "Unknown symbol.")
+            return
+        try:
+            quantity = float(self.order_quantity.get())
+            target_price = float(self.order_price.get())
+        except ValueError:
+            messagebox.showerror("Order rejected", "Quantity and target price must be numeric.")
+            return
+        if quantity <= 0 or target_price <= 0:
+            messagebox.showerror("Order rejected", "Quantity and target price must be greater than zero.")
+            return
+        order = {
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "type": self.order_type.get(),
+            "symbol": symbol,
+            "quantity": round(quantity, 3),
+            "target_price": round(target_price, 2),
+        }
+        self.session.user.setdefault("orders", []).append(order)
+        self.order_symbol.set(symbol)
+        self.status.set(f"Placed {order['type']} for {symbol}.")
+        self.refresh_all()
+
+    def cancel_selected_order(self) -> None:
+        if not hasattr(self, "orders_list"):
+            return
+        selection = self.orders_list.curselection()
+        orders = self.session.user.get("orders", [])
+        if not selection or selection[0] >= len(orders):
+            return
+        orders.pop(selection[0])
+        self.status.set("Order cancelled.")
+        self.refresh_all()
+
+    def process_orders(self) -> int:
+        user = self.session.user
+        remaining = []
+        triggered = 0
+        for order in user.get("orders", []):
+            item = next((asset_item for asset_item in self.get_assets() if asset_item["symbol"] == order.get("symbol")), None)
+            if not item:
+                continue
+            order_type = order.get("type")
+            quantity = order.get("quantity", 0)
+            target = order.get("target_price", 0)
+            should_trigger = (
+                (order_type == "Limit Buy" and item["price"] <= target)
+                or (order_type == "Limit Sell" and item["price"] >= target)
+                or (order_type == "Stop Loss" and item["price"] <= target)
+            )
+            if not should_trigger:
+                remaining.append(order)
+                continue
+            if order_type == "Limit Buy":
+                cost = item["price"] * quantity
+                if cost <= user.get("cash", 0):
+                    user["cash"] = round(user["cash"] - cost, 2)
+                    user.setdefault("portfolio", {})[item["symbol"]] = round(user.get("portfolio", {}).get(item["symbol"], 0) + quantity, 3)
+                    self.record_transaction("LIMIT BUY", item["symbol"], quantity, item["price"])
+                    triggered += 1
+                else:
+                    remaining.append(order)
+            else:
+                owned = user.get("portfolio", {}).get(item["symbol"], 0)
+                if owned >= quantity:
+                    proceeds = item["price"] * quantity
+                    user["cash"] = round(user["cash"] + proceeds, 2)
+                    remaining_qty = round(owned - quantity, 3)
+                    if remaining_qty <= 0:
+                        user["portfolio"].pop(item["symbol"], None)
+                    else:
+                        user["portfolio"][item["symbol"]] = remaining_qty
+                    self.record_transaction(order_type.upper(), item["symbol"], quantity, item["price"])
+                    triggered += 1
+                else:
+                    remaining.append(order)
+        user["orders"] = remaining
+        if triggered:
+            self.status.set(f"{triggered} order(s) triggered.")
+        return triggered
 
     def render_selected(self) -> None:
         item = self.selected_asset()
@@ -512,6 +955,13 @@ class VirtualStockMarketApp:
         if high == low:
             high += 1
             low -= 1
+        for line in range(5):
+            y = pad + line * (height - pad * 2) / 4
+            value = high - line * (high - low) / 4
+            self.chart.create_line(pad, y, width - pad, y, fill=colors["border"], dash=(2, 4))
+            self.chart.create_text(pad + 4, y - 8, anchor="w", text=money(value), fill=colors["muted"], font=("Arial", 9))
+        self.chart.create_line(pad, pad, pad, height - pad, fill=colors["border"])
+        self.chart.create_line(pad, height - pad, width - pad, height - pad, fill=colors["border"])
         points = []
         for idx, price in enumerate(history):
             x = pad + idx * (width - pad * 2) / (len(history) - 1)
@@ -646,9 +1096,34 @@ class VirtualStockMarketApp:
         )
         del self.session.user["transactions"][:-100]
 
+    def process_dividends(self) -> None:
+        user = self.session.user
+        for symbol, qty in list(user.get("portfolio", {}).items()):
+            item = next((asset_item for asset_item in self.get_assets() if asset_item["symbol"] == symbol), None)
+            if not item or item.get("category") not in {"Stock", "Fund"}:
+                continue
+            if time.time_ns() % 97 == 0:
+                dividend = round(item["price"] * qty * 0.003, 2)
+                if dividend > 0:
+                    user["cash"] = round(user.get("cash", 0) + dividend, 2)
+                    self.record_transaction("DIVIDEND", symbol, qty, dividend / qty if qty else dividend)
+                    self.session.market_data.setdefault("news_feed", []).append(
+                        {
+                            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "symbol": symbol,
+                            "category": item.get("category", "Stock"),
+                            "message": f"{symbol} paid a small dividend to holders.",
+                        }
+                    )
+
     def tick(self) -> None:
         advance_market(self.session.market_data, ticks=1)
-        self.status.set("Market tick simulated. Prices and news updated.")
+        self.process_dividends()
+        triggered = self.process_orders()
+        if triggered:
+            self.status.set(f"Market tick simulated. {triggered} order(s) triggered.")
+        else:
+            self.status.set("Market tick simulated. Prices and news updated.")
         self.refresh_all()
 
     def start_live_updates(self) -> None:
@@ -704,7 +1179,11 @@ class VirtualStockMarketApp:
         if not self.live_updates_enabled or not self.session:
             return
         advance_market(self.session.market_data, ticks=1)
-        self.status.set(f"Live market tick. Next update in {self.current_interval_seconds():.1f}s.")
+        self.process_dividends()
+        triggered = self.process_orders()
+        if triggered:
+            self.status.set(f"Live tick triggered {triggered} order(s). Next update in {self.current_interval_seconds():.1f}s.")
+        else:
+            self.status.set(f"Live market tick. Next update in {self.current_interval_seconds():.1f}s.")
         self.refresh_all()
         self.schedule_live_update()
-

@@ -11,6 +11,43 @@ from pathlib import Path
 from config import APP_SETTINGS_FILE, DATA_DIR, MARKET_FILE, STARTING_CURRENCY, USERS_FILE
 from market import generate_market
 
+
+def normalize_user_record(record: dict) -> dict:
+    record.setdefault("cash", STARTING_CURRENCY)
+    record.setdefault("portfolio", {})
+    record.setdefault("transactions", [])
+    record.setdefault("orders", [])
+    record.setdefault("net_worth_history", [])
+    record.setdefault("created_at", time.strftime("%Y-%m-%d %H:%M:%S"))
+    settings = record.setdefault("settings", {})
+    settings.setdefault("language", "English")
+    settings.setdefault("dark_mode", False)
+    settings.setdefault("tutorial_seen", False)
+    return record
+
+
+def normalize_users_data(data: dict) -> dict:
+    users = data.setdefault("users", {})
+    if not isinstance(users, dict):
+        data["users"] = {}
+        return data
+    for record in users.values():
+        if isinstance(record, dict):
+            normalize_user_record(record)
+    return data
+
+
+def normalize_market_data(data: dict) -> dict:
+    if not isinstance(data.get("assets"), list) or not data["assets"]:
+        data["assets"] = generate_market()
+    data.setdefault("last_tick", time.time())
+    settings = data.setdefault("settings", {})
+    settings.setdefault("volatility_multiplier", 1.0)
+    settings.setdefault("event_frequency", 1.0)
+    data.setdefault("news_feed", [])
+    return data
+
+
 def ensure_data_dir() -> None:
     DATA_DIR.mkdir(exist_ok=True)
     if not USERS_FILE.exists():
@@ -43,15 +80,17 @@ def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
 
 def create_user_record(username: str, password: str) -> dict:
     salt, digest = hash_password(password)
-    return {
+    return normalize_user_record({
         "password_salt": salt,
         "password_hash": digest,
         "cash": STARTING_CURRENCY,
         "portfolio": {},
         "transactions": [],
+        "orders": [],
+        "net_worth_history": [],
         "settings": {"language": "English", "dark_mode": False},
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-    }
+    })
 
 
 def verify_password(password: str, record: dict) -> bool:
