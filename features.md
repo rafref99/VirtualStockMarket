@@ -3,29 +3,47 @@
 ## Implemented
 
 - Login and registration screen at app launch.
+- Required registration mode choice: Sandbox, Realistic, or Fast Realistic.
 - Remember-me checkbox that saves only the last username locally.
 - Local credential storage in `data/users.json`.
 - Salted password hashing with PBKDF2-SHA256.
 - Branded app logo in the sidebar.
 - Icon-labeled primary controls.
+- Tooltips on key trading, simulation, refresh, and logout controls.
+- Tooltips on secondary bank, order, news, and settings controls.
+- Table-like headers on transaction, order, and bank lists for better scanning.
+- Graphical effects for trades, orders, achievements, risk events, and manual market ticks.
+- Optional sound effects with a Settings toggle.
 - Double-click launch scripts for macOS and Windows.
 - Starting balance of 100 fake currency units for every new user.
 - Generated market with well-known assets including Bitcoin, Microsoft, Apple, Alphabet, Amazon, Tesla, Nvidia, Ethereum, and Meta.
 - 100 additional random companies/assets across stocks, crypto, FNTs, commodities, and funds.
 - Market browsing with category filters.
+- Market sorting by symbol, name, price, or latest percentage change.
 - Green and red market-list change indicators for rising and falling assets.
 - Buy and sell support with decimal quantities.
 - Limit buy, limit sell, and stop-loss orders.
 - Occasional dividend payouts for held stocks and funds.
 - Portfolio view with current holding values.
 - Double-click portfolio holdings to select that asset in the market graph.
+- Dashboard home tab with account snapshot, biggest movers, top news, and risk alerts.
+- Dashboard portfolio allocation chart.
+- Dashboard news-quality and loan due-date widgets.
+- Achievements tab with automatically unlocked milestones for trading, profit, diversification, borrowing, debt repayment, order use, news reading, and leaderboard rank.
+- 50 additional achievement milestones across trades, portfolio breadth, net worth, cash, orders, news reading, loans, repayments, debt, and category holdings.
 - Transaction history tab.
 - Portfolio performance chart.
 - News feed tab with filtering.
+- Clickable news feed with full article details, source type, credibility, investment insight, and generated thumbnail illustrations.
+- Generated market news sources including newspapers, wire services, research blogs, social feeds, and YouTuber hype.
+- Global market stories including Moon/Mars space-economy optimism, macro reports, sector rotations, and rare conflict/oil supply shocks.
+- News generation is rate-limited so normal market steps do not publish a new article every tick.
+- Some news is intentionally misleading or hype-driven, so blindly following it can cause losses.
 - Local leaderboard.
 - Account summary with cash, holdings value, and net worth.
 - Account management for password changes and account deletion.
 - Price-history graph for the selected asset.
+- Real-world-scale market price ceilings with headroom and save-file normalization to prevent impossible runaway asset prices.
 - Chart range selector with Hours, Days, Week, Years, and Max views.
 - Clickable chart inspection with guide lines, highlighted point marker, and price tooltip.
 - Market tick simulation with price movement, volatility, trends, and short news updates.
@@ -34,7 +52,17 @@
 - Recent event log for the selected asset.
 - Live market updates with freeze/resume controls.
 - Custom live market step speed, clamped between 0.5 and 60 seconds.
+- Sandbox mode shows manual tick, freeze/resume, and update-speed controls.
+- Realistic mode runs automatically every second without manual tick, freeze/resume, or sidebar speed controls.
+- Fast Realistic mode runs automatically while keeping the update-speed control available.
+- Realistic and Fast Realistic accounts calculate offline market progress at the next login based on the time since the user closed the app or logged out.
+- Account settings show the last closed/logged-out date and the last login date.
+- Bank tab for requesting loans or credit and repaying outstanding balances with interest.
+- Credit limits, minimum payments, due dates, late fees, defaults, and credit-score changes.
+- Margin borrowing, short selling, collateral checks, forced liquidation risk, and temporary insurance hedges.
+- Bank debt, margin debt, and short liabilities are included in account net worth, performance snapshots, and the local leaderboard.
 - Settings tab with account, appearance, language, and system sections.
+- Scrollable Settings tab with a Credits section at the bottom.
 - Dark mode toggle.
 - UI language support for English, German, Russian, Greek, Spanish, and Arabic.
 - Simulation settings for speed presets, volatility, and event frequency.
@@ -49,4 +77,3 @@
 - Daily quests or challenges.
 - Deeper company profiles and generated earnings statements.
 - Import/export save files.
-- Optional sound and visual effects for major market events.

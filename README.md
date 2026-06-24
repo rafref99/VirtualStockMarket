@@ -50,22 +50,40 @@ The launcher scripts check Python, Tkinter, and `requirements.txt` before starti
 
 ## Highlights
 
-- Local login/register flow with salted password hashing.
+- Local login/register flow with salted password hashing and required trading mode selection.
 - New users start with `100 FC` fake currency.
+- Trading modes: Sandbox, Realistic, and Fast Realistic.
 - Remember-me option that stores only the last username, never the password.
 - 110 generated assets, including Bitcoin, Microsoft, Apple, Alphabet, Amazon, Tesla, Nvidia, Ethereum, and Meta.
 - Stocks, crypto, FNTs, commodities, and funds.
 - Live market updates with freeze/resume and adjustable tick speed.
 - Manual market tick button for testing or slower play.
+- Mode-specific market controls: Sandbox exposes manual tick, freeze/resume, and speed; Realistic runs every second with those controls hidden; Fast Realistic runs automatically with speed control available.
+- Realistic and Fast Realistic modes catch up market progress on the next login using the time since the user last closed the app or logged out.
 - Clickable charts with price tooltips and point markers.
 - Chart ranges: `Hours`, `Days`, `Week`, `Years`, and `Max`.
 - Green/red market movement indicators.
+- Market sorting by symbol, name, price, or latest percentage change.
+- Tooltips on key trading, simulation, bank, order, news, and settings controls.
+- Table-like headers on transaction, order, and bank lists for faster scanning.
+- Graphical pulse/confetti effects and optional sound cues for trades, orders, achievements, risk events, and manual ticks.
 - Buy, sell, limit buy, limit sell, and stop-loss orders.
+- Bank tab with loans, credit limits, minimum payments, due dates, late fees, defaults, and interest.
+- Risk tools for margin borrowing, short selling, collateral checks, liquidation risk, credit score changes, and temporary insurance hedges.
+- Dashboard home tab for account snapshot, portfolio allocation, biggest movers, top news, news quality, loan due dates, and risk alerts.
+- Achievements tab with milestones for trading, profit, diversification, bank use, news reading, and leaderboard rank.
+- 50 additional achievement milestones for deeper progression.
+- Real-world-scale price ceilings with headroom prevent impossible runaway asset prices.
 - Portfolio value tracking and performance chart.
 - Transaction history, active orders, news feed, and local leaderboard tabs.
+- Clickable news feed with full article details, generated thumbnails, credibility ratings, and investment insight.
 - Complex market events: earnings surprises, lawsuits, product launches, crypto scares, supply shocks, fund flows, and broad market rotations.
+- Expanded news sources include newspapers, research blogs, YouTuber hype, social chatter, Moon/Mars stories, macro news, and rare oil/conflict shocks.
+- Generated news is throttled, so not every market tick creates a new article.
+- Some stories are misleading, so news can help investing decisions but can also create bad trades if followed blindly.
 - Occasional dividends for held stocks and funds.
 - Settings for dark mode, language, simulation speed, volatility, and event frequency.
+- Scrollable Settings tab with credits.
 - UI translations for English, German, Russian, Greek, Spanish, and Arabic.
 - Keyboard shortcuts for common trading actions.
 
@@ -73,10 +91,11 @@ The launcher scripts check Python, Tkinter, and `requirements.txt` before starti
 
 1. Open the app with one of the launcher scripts or `python3 app.py`.
 2. Register a new account.
-3. Start with `100 FC`.
-4. Select an asset in the Market tab.
-5. Buy, sell, place orders, or watch the chart update live.
-6. Use the Settings tab to enable dark mode, change language, or tune the simulation.
+3. Choose a trading mode.
+4. Start with `100 FC`.
+5. Select an asset in the Market tab.
+6. Buy, sell, place orders, request bank funding, or watch the chart update live.
+7. Use the Settings tab to enable dark mode, change language, or tune the simulation.
 
 ## Keyboard Shortcuts
 
@@ -92,7 +111,7 @@ The launcher scripts check Python, Tkinter, and `requirements.txt` before starti
 
 Runtime data is stored locally inside `data/`, which is ignored by git:
 
-- `data/users.json`: users, salted password hashes, cash, portfolios, orders, transactions, and settings.
+- `data/users.json`: users, salted password hashes, cash, portfolios, orders, transactions, settings, bank debt, risk positions, and last closed/login timestamps.
 - `data/market.json`: generated assets, prices, history, sectors, news, simulation settings, and event state.
 - `data/app_settings.json`: app-level preferences such as remembered username.
 
