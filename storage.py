@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from config import APP_SETTINGS_FILE, DATA_DIR, MARKET_FILE, STARTING_CURRENCY, USERS_FILE
-from market import generate_market, normalize_asset_prices, seed_news
+from market import ensure_market_systems, generate_market, normalize_asset_prices, seed_news
 
 
 def normalize_user_record(record: dict) -> dict:
@@ -24,7 +24,10 @@ def normalize_user_record(record: dict) -> dict:
     record.setdefault("insurance_policies", [])
     record.setdefault("liquidations", [])
     record.setdefault("achievements", {})
+    record.setdefault("daily_quest_day", "")
+    record.setdefault("daily_quests", [])
     record.setdefault("read_news", [])
+    record.setdefault("bookmarked_news", [])
     record.setdefault("news_read_count", 0)
     record.setdefault("net_worth_history", [])
     record.setdefault("created_at", time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -36,7 +39,7 @@ def normalize_user_record(record: dict) -> dict:
     settings = record.setdefault("settings", {})
     settings.setdefault("language", "English")
     settings.setdefault("dark_mode", False)
-    settings.setdefault("sound_effects_enabled", True)
+    settings.pop("sound_effects_enabled", None)
     settings.setdefault("tutorial_seen", False)
     settings.setdefault("trading_mode", "sandbox")
     settings.setdefault("live_interval_seconds", 3.0)
@@ -62,6 +65,7 @@ def normalize_market_data(data: dict) -> dict:
     settings.setdefault("volatility_multiplier", 1.0)
     settings.setdefault("event_frequency", 1.0)
     data.setdefault("news_feed", [])
+    ensure_market_systems(data)
     normalize_asset_prices(data)
     seed_news(data)
     return data
@@ -113,13 +117,15 @@ def create_user_record(username: str, password: str) -> dict:
         "insurance_policies": [],
         "liquidations": [],
         "achievements": {},
+        "daily_quest_day": "",
+        "daily_quests": [],
         "read_news": [],
+        "bookmarked_news": [],
         "news_read_count": 0,
         "net_worth_history": [],
         "settings": {
             "language": "English",
             "dark_mode": False,
-            "sound_effects_enabled": True,
             "trading_mode": "sandbox",
             "live_interval_seconds": 3.0,
         },

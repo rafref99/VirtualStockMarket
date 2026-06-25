@@ -20,6 +20,13 @@ SECTORS = {
     "Commodity": ["Commodities"],
     "Fund": ["Index Fund"],
 }
+MACRO_DEFAULTS = {
+    "inflation": 2.6,
+    "interest_rate": 3.2,
+    "unemployment": 4.4,
+    "oil_price": 78.0,
+    "currency_index": 100.0,
+}
 MARKET_EVENT_CHANCE = 0.08
 ASSET_EVENT_CHANCE = 0.025
 GLOBAL_STORY_CHANCE = 0.018
@@ -45,6 +52,151 @@ def normalize_asset_prices(market: dict) -> None:
             clamp_asset_price(item)
 
 
+def cycle_keys() -> list[str]:
+    sectors = sorted({sector for values in SECTORS.values() for sector in values})
+    return sectors + ["Stock", "Crypto", "FNT", "Commodity", "Fund", "Market"]
+
+
+def financial_profile(category: str, price: float, volatility: float, trend: float, sector: str) -> dict:
+    if category in {"Stock", "Fund"}:
+        revenue = random.uniform(80, 900)
+        growth = random.uniform(-0.08, 0.18) + trend * 8
+        margin = random.uniform(0.04, 0.28)
+        debt_ratio = random.uniform(0.08, 0.72)
+    elif category == "Crypto":
+        revenue = random.uniform(12, 220)
+        growth = random.uniform(-0.18, 0.35)
+        margin = random.uniform(-0.05, 0.22)
+        debt_ratio = random.uniform(0.0, 0.18)
+    elif category == "FNT":
+        revenue = random.uniform(2, 70)
+        growth = random.uniform(-0.28, 0.45)
+        margin = random.uniform(-0.12, 0.35)
+        debt_ratio = random.uniform(0.0, 0.35)
+    else:
+        revenue = random.uniform(40, 500)
+        growth = random.uniform(-0.1, 0.16)
+        margin = random.uniform(0.03, 0.22)
+        debt_ratio = random.uniform(0.05, 0.55)
+    risk_score = min(99, max(1, int(35 + volatility * 620 + debt_ratio * 25 - growth * 28)))
+    if risk_score >= 72:
+        risk_rating = "High"
+    elif risk_score >= 48:
+        risk_rating = "Medium"
+    else:
+        risk_rating = "Low"
+    if growth > 0.09 and debt_ratio < 0.55:
+        outlook = "Positive"
+    elif growth < -0.04 or debt_ratio > 0.68:
+        outlook = "Cautious"
+    else:
+        outlook = "Stable"
+    return {
+        "revenue": round(revenue, 2),
+        "profit_margin": round(margin, 3),
+        "growth": round(growth, 3),
+        "debt_ratio": round(debt_ratio, 3),
+        "risk_score": risk_score,
+        "risk_rating": risk_rating,
+        "sector_outlook": outlook,
+        "last_earnings": "beat" if growth > 0.08 else "miss" if growth < -0.04 else "in line",
+        "earnings_in_ticks": random.randint(35, 95),
+        "profile_note": f"{sector} outlook is {outlook.lower()} with {risk_rating.lower()} operating risk.",
+    }
+
+
+def ensure_asset_profile(item: dict, market_tick: int = 0) -> None:
+    category = item.get("category", "Stock")
+    sector = item.setdefault("sector", random.choice(SECTORS.get(category, ["General"])))
+    item.setdefault("financials", financial_profile(category, float(item.get("price", 1.0) or 1.0), float(item.get("volatility", 0.03) or 0.03), float(item.get("trend", 0.0) or 0.0), sector))
+    if category in {"Stock", "Fund"}:
+        item.setdefault("dividend_yield", round(random.uniform(0.006, 0.045 if category == "Fund" else 0.032), 4))
+        item.setdefault("dividend_interval_ticks", random.randint(45, 90))
+        item.setdefault("next_dividend_tick", market_tick + random.randint(12, 60))
+    else:
+        item.setdefault("dividend_yield", 0.0)
+        item.setdefault("dividend_interval_ticks", 0)
+        item.setdefault("next_dividend_tick", 0)
+
+
+def ensure_market_systems(market: dict) -> None:
+    market.setdefault("tick_count", 0)
+    if not isinstance(market.get("source_reputation"), dict):
+        market["source_reputation"] = {}
+    macro = market.setdefault("macro", {})
+    for key, value in MACRO_DEFAULTS.items():
+        macro.setdefault(key, value)
+    sector_cycles = market.setdefault("sector_cycles", {})
+    for key in cycle_keys():
+        sector_cycles.setdefault(
+            key,
+            {
+                "phase": random.uniform(0, math.tau),
+                "speed": random.uniform(0.045, 0.12),
+                "strength": random.uniform(0.001, 0.007),
+                "momentum": 0.0,
+            },
+        )
+    for item in market.get("assets", []):
+        if isinstance(item, dict):
+            ensure_asset_profile(item, int(market.get("tick_count", 0) or 0))
+
+
+def update_macro_systems(market: dict) -> None:
+    ensure_market_systems(market)
+    macro = market["macro"]
+    macro["inflation"] = round(min(max(macro.get("inflation", 2.6) * 0.992 + random.gauss(2.6, 0.035) * 0.008, 0.2), 9.5), 2)
+    macro["interest_rate"] = round(min(max(macro.get("interest_rate", 3.2) * 0.994 + random.gauss(3.2, 0.03) * 0.006, 0.0), 8.5), 2)
+    macro["unemployment"] = round(min(max(macro.get("unemployment", 4.4) * 0.995 + random.gauss(4.4, 0.03) * 0.005, 2.0), 11.0), 2)
+    macro["oil_price"] = round(min(max(macro.get("oil_price", 78.0) * (1 + random.gauss(0, 0.006)), 25.0), 180.0), 2)
+    macro["currency_index"] = round(min(max(macro.get("currency_index", 100.0) * (1 + random.gauss(0, 0.0025)), 72.0), 132.0), 2)
+    macro_history = market.setdefault("macro_history", [])
+    macro_history.append({"tick": market.get("tick_count", 0), **macro})
+    del macro_history[:-240]
+    for cycle in market.get("sector_cycles", {}).values():
+        cycle["phase"] = float(cycle.get("phase", 0.0)) + float(cycle.get("speed", 0.07))
+        cycle["momentum"] = round(math.sin(cycle["phase"]) * float(cycle.get("strength", 0.003)) + random.gauss(0, 0.0008), 5)
+
+
+def macro_impact_for_asset(market: dict, item: dict) -> float:
+    macro = market.get("macro", MACRO_DEFAULTS)
+    category = item.get("category", "Stock")
+    sector = item.get("sector", "")
+    inflation = float(macro.get("inflation", 2.6))
+    rate = float(macro.get("interest_rate", 3.2))
+    unemployment = float(macro.get("unemployment", 4.4))
+    oil_history = market.get("macro_history", [])
+    previous_oil = float(oil_history[-2].get("oil_price", macro.get("oil_price", 78.0))) if len(oil_history) > 1 else float(macro.get("oil_price", 78.0))
+    oil_change = (float(macro.get("oil_price", 78.0)) - previous_oil) / previous_oil if previous_oil else 0.0
+    impact = 0.0
+    if category in {"Stock", "Fund"}:
+        impact += (4.8 - unemployment) * 0.00045
+        impact -= max(0.0, rate - 3.0) * 0.0008
+        impact -= max(0.0, inflation - 2.5) * 0.00055
+    if category == "Crypto":
+        impact -= max(0.0, rate - 3.0) * 0.0011
+        impact += (2.8 - inflation) * 0.00035
+    if category == "Commodity" or sector == "Energy":
+        impact += oil_change * 0.35
+        impact += max(0.0, inflation - 2.5) * 0.00035
+    if sector == "Finance":
+        impact += (rate - 3.0) * 0.00035
+    return round(impact, 5)
+
+
+def cycle_impact_for_asset(market: dict, item: dict) -> float:
+    cycles = market.get("sector_cycles", {})
+    sector_cycle = cycles.get(item.get("sector", ""), {})
+    category_cycle = cycles.get(item.get("category", ""), {})
+    market_cycle = cycles.get("Market", {})
+    return round(
+        float(sector_cycle.get("momentum", 0.0)) * 0.65
+        + float(category_cycle.get("momentum", 0.0)) * 0.45
+        + float(market_cycle.get("momentum", 0.0)) * 0.35,
+        5,
+    )
+
+
 def source_profile(category: str, misleading: bool = False) -> dict:
     profiles = [
         ("Daily Ledger", "Newspaper", 0.78, "newspaper"),
@@ -64,6 +216,39 @@ def source_profile(category: str, misleading: bool = False) -> dict:
         return {"name": "FinTube Alpha", "type": "YouTuber", "credibility": 0.28, "image_key": "youtuber"}
     name, source_type, credibility, image_key = random.choice(profiles)
     return {"name": name, "type": source_type, "credibility": credibility, "image_key": image_key}
+
+
+def title_template_for_article(source_type: str, category: str, momentum: float) -> str:
+    if source_type == "YouTuber":
+        return "headline_youtuber"
+    if category == "Commodity":
+        return "headline_commodity_supply"
+    if momentum > 0:
+        return "headline_bullish_signal"
+    if momentum < 0:
+        return "headline_bearish_signal"
+    return "headline_mixed_signal"
+
+
+def image_key_for_story(category: str, message: str, source_type: str, misleading: bool, momentum: float) -> str:
+    lowered = message.lower()
+    if abs(momentum) >= 0.04 or "war" in lowered or "shock" in lowered:
+        return "breaking"
+    if misleading or source_type in {"YouTuber", "Social Feed"}:
+        return "youtuber"
+    if "earnings" in lowered or "revenue" in lowered or "guidance" in lowered:
+        return "earnings"
+    if "lawsuit" in lowered or "regulator" in lowered:
+        return "lawsuit"
+    if category == "Crypto":
+        return "crypto"
+    if category == "Fund":
+        return "fund"
+    if category == "Commodity" or "oil" in lowered or "supply" in lowered:
+        return "oil"
+    if "inflation" in lowered or "rate" in lowered or "central bank" in lowered:
+        return "rates"
+    return "newspaper"
 
 
 def build_article(
@@ -92,6 +277,7 @@ def build_article(
         title = f"{title_start} {topic}: \"this could explode\""
     if category == "Commodity":
         title = f"{title_start} {topic} as supply risks move prices"
+    title_key = title_template_for_article(source["type"], category, momentum)
 
     if misleading:
         insight = "Hype warning: the headline sounds confident, but the signal quality is weak and the move may reverse."
@@ -117,7 +303,9 @@ def build_article(
         "impact": direction,
         "insight": insight,
         "misleading": misleading,
-        "image_key": source["image_key"],
+        "image_key": image_key_for_story(category, message, source["type"], misleading, momentum) or source["image_key"],
+        "title_key": title_key,
+        "title_values": {"topic": topic},
     }
 
 
@@ -133,6 +321,8 @@ def append_news(
     source: dict | None = None,
     image_key: str | None = None,
     misleading: bool = False,
+    title_key: str | None = None,
+    title_values: dict | None = None,
     force: bool = False,
 ) -> None:
     if market is None:
@@ -149,13 +339,36 @@ def append_news(
         article["body"] = body
     if image_key:
         article["image_key"] = image_key
+    if title_key:
+        article["title_key"] = title_key
+    if title_values:
+        article["title_values"] = title_values
+    impact_score = abs(momentum) * max(1, duration)
+    breaking = bool(abs(momentum) >= 0.035 or impact_score >= 0.20 or "war " in message.lower() or "skyrocket" in message.lower())
+    if breaking and not image_key:
+        article["image_key"] = "breaking"
+    impact_data = {}
+    if symbol != "MARKET" and duration and momentum:
+        current_tick = int(market.get("tick_count", 0) or 0)
+        found = next((item for item in market.get("assets", []) if item.get("symbol") == symbol), None)
+        if found:
+            impact_data = {
+                "created_tick": current_tick,
+                "impact_end_tick": current_tick + duration,
+                "start_price": found.get("price", 0),
+                "expected_direction": "up" if momentum > 0 else "down",
+                "outcome": "pending",
+            }
     feed = market.setdefault("news_feed", [])
     feed.append({
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "symbol": symbol,
         "category": category,
         "message": message,
+        "breaking": breaking,
+        "impact_score": round(impact_score, 4),
         **article,
+        **impact_data,
     })
     del feed[:-180]
     if not force:
@@ -163,11 +376,12 @@ def append_news(
         market["_news_cooldown_ticks"] = NEWS_TICK_COOLDOWN
 
 def asset(symbol: str, name: str, category: str, price: float, volatility: float, trend: float, sector: str | None = None) -> dict:
-    return {
+    sector = sector or random.choice(SECTORS.get(category, ["General"]))
+    item = {
         "symbol": symbol,
         "name": name,
         "category": category,
-        "sector": sector or random.choice(SECTORS.get(category, ["General"])),
+        "sector": sector,
         "price": round(price, 2),
         "volatility": volatility,
         "trend": trend,
@@ -178,6 +392,8 @@ def asset(symbol: str, name: str, category: str, price: float, volatility: float
         "event_momentum": 0.0,
         "event_momentum_ticks": 0,
     }
+    ensure_asset_profile(item, 0)
+    return item
 
 
 def generate_symbol(name: str, used: set[str]) -> str:
@@ -253,6 +469,8 @@ def seed_news(market: dict) -> None:
         ),
         source={"name": "Daily Ledger", "type": "Newspaper", "credibility": 0.78, "image_key": "newspaper"},
         image_key="newspaper",
+        title_key="headline_demand_watch",
+        title_values={"symbol": tech["symbol"]},
         force=True,
     )
     append_news(
@@ -270,6 +488,8 @@ def seed_news(market: dict) -> None:
         source={"name": "FinTube Alpha", "type": "YouTuber", "credibility": 0.31, "image_key": "youtuber"},
         image_key="youtuber",
         misleading=True,
+        title_key="headline_youtuber_symbol",
+        title_values={"symbol": crypto["symbol"]},
         force=True,
     )
     append_news(
@@ -286,6 +506,8 @@ def seed_news(market: dict) -> None:
         ),
         source={"name": "Energy Sentinel", "type": "Newspaper", "credibility": 0.81, "image_key": "oil"},
         image_key="oil",
+        title_key="headline_commodity_symbol",
+        title_values={"symbol": commodity["symbol"]},
         force=True,
     )
 
@@ -421,6 +643,7 @@ def maybe_global_story(market: dict, event_frequency: float) -> None:
                 body=body,
                 source={"name": "Energy Sentinel", "type": "Newspaper", "credibility": 0.84, "image_key": "oil"},
                 image_key="oil",
+                title_key="headline_rare_oil",
             )
             apply_story_to_assets(market, commodities, message, 0.045, 10, 0.02)
         return
@@ -436,7 +659,7 @@ def maybe_global_story(market: dict, event_frequency: float) -> None:
             "Frontier Briefing says several governments are discussing lunar logistics contracts. Traders are watching robotics, cloud, aerospace, and industrial suppliers.\n\n"
             "Investment insight: technology and industrial assets may benefit, but only companies already showing strength usually hold the gains."
         )
-        append_news(market, message, "MARKET", "Market", 0.018, 7, title="We are going back to the Moon, and suppliers could benefit", body=body, source={"name": "Frontier Briefing", "type": "Science Desk", "credibility": 0.74, "image_key": "space"}, image_key="space")
+        append_news(market, message, "MARKET", "Market", 0.018, 7, title="We are going back to the Moon, and suppliers could benefit", body=body, source={"name": "Frontier Briefing", "type": "Science Desk", "credibility": 0.74, "image_key": "space"}, image_key="space", title_key="headline_moon")
         apply_story_to_assets(market, candidates, message, 0.018, 7, 0.006)
     elif story_type == "mars":
         candidates = [item for item in assets if item.get("sector") in {"Technology", "Industrial"}]
@@ -445,7 +668,7 @@ def maybe_global_story(market: dict, event_frequency: float) -> None:
             "A research note claims the next Mars program will require autonomous systems, secure cloud infrastructure, and advanced transport suppliers.\n\n"
             "Investment insight: this favors long-horizon growth assets, but speculative space headlines often fade if no contract follows."
         )
-        append_news(market, message, "MARKET", "Market", 0.015, 6, title="Mars supply chain watch: traders chase frontier technology", body=body, source={"name": "MacroScope", "type": "Research Blog", "credibility": 0.67, "image_key": "space"}, image_key="space")
+        append_news(market, message, "MARKET", "Market", 0.015, 6, title="Mars supply chain watch: traders chase frontier technology", body=body, source={"name": "MacroScope", "type": "Research Blog", "credibility": 0.67, "image_key": "space"}, image_key="space", title_key="headline_mars")
         apply_story_to_assets(market, candidates, message, 0.015, 6, 0.007)
     elif story_type == "influencer":
         item = random.choice(assets)
@@ -469,6 +692,8 @@ def maybe_global_story(market: dict, event_frequency: float) -> None:
             source={"name": "FinTube Alpha", "type": "YouTuber", "credibility": 0.29 if misleading else 0.43, "image_key": "youtuber"},
             image_key="youtuber",
             misleading=misleading,
+            title_key="headline_youtuber_symbol",
+            title_values={"symbol": item["symbol"]},
         )
         add_event(item, message, actual_momentum, 5, 0.018, market, misleading=misleading)
     elif story_type == "macro":
@@ -479,7 +704,7 @@ def maybe_global_story(market: dict, event_frequency: float) -> None:
             "Daily Ledger reports that traders are repricing interest-rate expectations after a surprise macro reading.\n\n"
             "Investment insight: funds and large stocks often react first. The direction matters less than whether the next few ticks confirm it."
         )
-        append_news(market, message, "MARKET", "Market", momentum, 6, title="Global macro report moves rate-sensitive assets", body=body, source={"name": "Daily Ledger", "type": "Newspaper", "credibility": 0.79, "image_key": "globe"}, image_key="globe")
+        append_news(market, message, "MARKET", "Market", momentum, 6, title="Global macro report moves rate-sensitive assets", body=body, source={"name": "Daily Ledger", "type": "Newspaper", "credibility": 0.79, "image_key": "globe"}, image_key="globe", title_key="headline_macro")
         apply_story_to_assets(market, candidates, message, momentum, 6, 0.006)
     else:
         category = random.choice(["Crypto", "FNT", "Fund", "Stock"])
@@ -491,21 +716,79 @@ def maybe_global_story(market: dict, event_frequency: float) -> None:
             f"Street Chatter says retail traders are moving into {category.lower()} assets. The story may create momentum, but social rotations can reverse quickly.\n\n"
             "Investment insight: useful for spotting attention, not a complete trading thesis."
         )
-        append_news(market, message, "MARKET", category, 0.018, 4, title=f"Social feed: traders pile into {category.lower()} names", body=body, source={"name": "Street Chatter", "type": "Social Feed", "credibility": 0.36, "image_key": "youtuber"}, image_key="youtuber", misleading=random.random() < 0.25)
+        append_news(market, message, "MARKET", category, 0.018, 4, title=f"Social feed: traders pile into {category.lower()} names", body=body, source={"name": "Street Chatter", "type": "Social Feed", "credibility": 0.36, "image_key": "youtuber"}, image_key="youtuber", misleading=random.random() < 0.25, title_key="headline_social_rotation", title_values={"category": category.lower()})
         apply_story_to_assets(market, candidates, message, 0.018, 4, 0.01)
 
 
+def update_news_outcomes(market: dict) -> None:
+    current_tick = int(market.get("tick_count", 0) or 0)
+    assets_by_symbol = {item.get("symbol"): item for item in market.get("assets", [])}
+    for event in market.get("news_feed", []):
+        if event.get("outcome") != "pending":
+            continue
+        end_tick = int(event.get("impact_end_tick", 0) or 0)
+        symbol = event.get("symbol", "")
+        item = assets_by_symbol.get(symbol)
+        start_price = float(event.get("start_price", 0.0) or 0.0)
+        if not item or not start_price or current_tick < end_tick:
+            continue
+        actual_return = (float(item.get("price", start_price)) - start_price) / start_price
+        expected = event.get("expected_direction", "")
+        if expected == "up":
+            helped = actual_return > 0.002
+        elif expected == "down":
+            helped = actual_return < -0.002
+        else:
+            helped = abs(actual_return) <= 0.004
+        event["actual_return"] = round(actual_return, 4)
+        event["end_price"] = item.get("price", start_price)
+        event["outcome"] = "helped" if helped else "misled"
+        update_source_reputation(market, event, helped)
+
+
+def update_source_reputation(market: dict, event: dict, helped: bool) -> None:
+    if event.get("reputation_recorded"):
+        return
+    source = event.get("source", "Market Desk")
+    reputation = market.setdefault("source_reputation", {})
+    row = reputation.setdefault(
+        source,
+        {
+            "source_type": event.get("source_type", "Newswire"),
+            "articles": 0,
+            "resolved": 0,
+            "helped": 0,
+            "misled": 0,
+            "credibility_total": 0.0,
+            "last_outcome": "",
+            "last_updated": "",
+        },
+    )
+    row["articles"] = int(row.get("articles", 0) or 0) + 1
+    row["resolved"] = int(row.get("resolved", 0) or 0) + 1
+    row["helped"] = int(row.get("helped", 0) or 0) + (1 if helped else 0)
+    row["misled"] = int(row.get("misled", 0) or 0) + (0 if helped else 1)
+    row["credibility_total"] = round(float(row.get("credibility_total", 0.0) or 0.0) + float(event.get("credibility", 0.6) or 0.6), 4)
+    row["last_outcome"] = event.get("outcome", "")
+    row["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    event["reputation_recorded"] = True
+
+
 def advance_market(market: dict, ticks: int = 1) -> None:
+    ensure_market_systems(market)
     settings = market.setdefault("settings", {})
     volatility_multiplier = float(settings.get("volatility_multiplier", 1.0))
     event_frequency = float(settings.get("event_frequency", 1.0))
     for _ in range(max(1, ticks)):
+        market["tick_count"] = int(market.get("tick_count", 0) or 0) + 1
         market["_news_created_this_tick"] = 0
         market["_news_cooldown_ticks"] = max(0, int(market.get("_news_cooldown_ticks", 0) or 0) - 1)
+        update_macro_systems(market)
         maybe_global_story(market, event_frequency)
         maybe_market_event(market, event_frequency)
         for item in market["assets"]:
             item.setdefault("sector", random.choice(SECTORS.get(item.get("category", "Stock"), ["General"])))
+            ensure_asset_profile(item, int(market.get("tick_count", 0) or 0))
             item["event_cooldown"] = max(0, item.get("event_cooldown", 0) - 1)
             maybe_asset_event(item, market, event_frequency)
 
@@ -518,10 +801,11 @@ def advance_market(market: dict, ticks: int = 1) -> None:
                 item["temporary_volatility"] = max(0.0, temp_volatility * 0.75)
 
             volatility = (item.get("volatility", 0.03) + temp_volatility) * volatility_multiplier
-            shock = random.gauss(item.get("trend", 0) + momentum, volatility)
-            cycle = math.sin(time.time() / 40 + len(item["symbol"])) * 0.006
+            macro_impact = macro_impact_for_asset(market, item)
+            cycle = cycle_impact_for_asset(market, item)
+            shock = random.gauss(item.get("trend", 0) + momentum + macro_impact + cycle, volatility)
             cap = max_asset_price(item)
-            new_price = max(0.25, item["price"] * (1 + shock + cycle))
+            new_price = max(0.25, item["price"] * (1 + shock))
             if new_price > cap:
                 new_price = cap
                 item["event_momentum"] = min(item.get("event_momentum", 0.0), 0.0)
@@ -533,4 +817,5 @@ def advance_market(market: dict, ticks: int = 1) -> None:
             if abs(shock) > volatility * 1.4:
                 direction = "rallies" if shock > 0 else "slides"
                 item["news"] = f"{item['symbol']} {direction} after heavy trading"
+        update_news_outcomes(market)
     market["last_tick"] = time.time()

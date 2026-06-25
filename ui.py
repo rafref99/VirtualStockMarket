@@ -3,7 +3,8 @@ from __future__ import annotations
 import platform
 import random
 import time
-from tkinter import BOTH, END, LEFT, RIGHT, X, Y, BooleanVar, Canvas, Label, Listbox, StringVar, Tk, Toplevel, messagebox, simpledialog
+from pathlib import Path
+from tkinter import BOTH, END, LEFT, RIGHT, X, Y, BooleanVar, Canvas, Label, Listbox, StringVar, Tk, Toplevel, filedialog, messagebox, simpledialog
 from tkinter import ttk
 
 from config import APP_SETTINGS_FILE, CHART_RANGES, DATA_DIR, MARKET_FILE, STARTING_CURRENCY, USERS_FILE, money
@@ -22,6 +23,7 @@ from storage import (
 )
 
 TRADING_MODES = ("sandbox", "realistic", "fast_realistic")
+NEWS_VIEWS = ("all", "unread", "bookmarked")
 LOAN_OPTIONS = {
     "loan": {"rate": 0.08, "label_key": "loan"},
     "credit": {"rate": 0.15, "label_key": "credit"},
@@ -160,6 +162,8 @@ class VirtualStockMarketApp:
         self.volatility_multiplier = StringVar(value="1.0")
         self.event_frequency = StringVar(value="1.0")
         self.news_filter = StringVar(value="All")
+        self.news_search = StringVar(value="")
+        self.news_view = StringVar(value="")
         self.order_type = StringVar(value="Limit Buy")
         self.order_symbol = StringVar()
         self.order_quantity = StringVar(value="1")
@@ -167,6 +171,7 @@ class VirtualStockMarketApp:
         self.bank_funding_type = StringVar(value="")
         self.bank_amount = StringVar(value="25")
         self.bank_repayment = StringVar(value="25")
+        self.bank_advanced_visible = BooleanVar(value=False)
         self.margin_amount = StringVar(value="25")
         self.margin_repayment = StringVar(value="25")
         self.short_symbol = StringVar()
@@ -174,12 +179,14 @@ class VirtualStockMarketApp:
         self.insurance_symbol = StringVar()
         self.language = StringVar(value="English")
         self.dark_mode = BooleanVar(value=False)
-        self.sound_effects_enabled = BooleanVar(value=True)
         self.live_button_text = StringVar(value="")
         self.chart_range = StringVar(value="Days")
         self.chart_points: list[dict] = []
         self.portfolio_symbols: list[str] = []
         self.visible_news: list[dict] = []
+        self.selected_news_id = ""
+        self.last_breaking_news_id = ""
+        self.refreshing_market_list = False
         self.logo_canvas: Canvas | None = None
         self.effect_canvas: Canvas | None = None
         self.status_label = None
@@ -226,6 +233,15 @@ class VirtualStockMarketApp:
             if label == self.tr(label_key):
                 return sort_key
         return "symbol"
+
+    def news_view_label(self, view: str) -> str:
+        return self.tr(f"news_view_{view}") if view in NEWS_VIEWS else self.tr("news_view_all")
+
+    def news_view_from_label(self, label: str) -> str:
+        for view in NEWS_VIEWS:
+            if label == self.news_view_label(view):
+                return view
+        return "all"
 
     def current_trading_mode(self) -> str:
         mode = self.trading_mode.get()
@@ -347,21 +363,6 @@ class VirtualStockMarketApp:
             highlightcolor=colors["border"],
         )
 
-    def play_sound(self, kind: str = "success") -> None:
-        if not self.sound_effects_enabled.get():
-            return
-        patterns = {
-            "success": [0],
-            "trade": [0, 90],
-            "sell": [0, 75],
-            "order": [0, 120],
-            "achievement": [0, 90, 180],
-            "risk": [0, 140],
-            "error": [0],
-        }
-        for delay in patterns.get(kind, patterns["success"]):
-            self.root.after(delay, self.root.bell)
-
     def flash_status(self, kind: str = "success") -> None:
         if not self.status_label:
             return
@@ -441,8 +442,7 @@ class VirtualStockMarketApp:
 
         fall()
 
-    def trigger_effect(self, kind: str = "success", label: str = "", sound: str | None = None) -> None:
-        self.play_sound(sound or kind)
+    def trigger_effect(self, kind: str = "success", label: str = "") -> None:
         self.flash_status(kind)
         self.pulse_effect(kind, label)
 
@@ -482,7 +482,7 @@ class VirtualStockMarketApp:
         settings = user.setdefault("settings", {})
         settings.setdefault("language", "English")
         settings.setdefault("dark_mode", False)
-        settings.setdefault("sound_effects_enabled", True)
+        settings.pop("sound_effects_enabled", None)
         settings.setdefault("trading_mode", "sandbox")
         settings.setdefault("live_interval_seconds", 3.0)
         return settings
@@ -492,7 +492,6 @@ class VirtualStockMarketApp:
         language = settings.get("language", "English")
         self.language.set(language if language in LANGUAGES else "English")
         self.dark_mode.set(bool(settings.get("dark_mode", False)))
-        self.sound_effects_enabled.set(bool(settings.get("sound_effects_enabled", True)))
         mode = settings.get("trading_mode", "sandbox")
         self.trading_mode.set(mode if mode in TRADING_MODES else "sandbox")
         interval = 1.0 if self.current_trading_mode() == "realistic" else float(settings.get("live_interval_seconds", 3.0))
@@ -506,7 +505,6 @@ class VirtualStockMarketApp:
         settings = self.ensure_user_settings()
         settings["language"] = self.language.get()
         settings["dark_mode"] = bool(self.dark_mode.get())
-        settings["sound_effects_enabled"] = bool(self.sound_effects_enabled.get())
         settings["trading_mode"] = self.current_trading_mode()
         if self.current_trading_mode() != "realistic":
             settings["live_interval_seconds"] = self.current_interval_seconds(show_errors=False)
@@ -521,6 +519,12 @@ class VirtualStockMarketApp:
     def now_stamp(self) -> tuple[float, str]:
         timestamp = time.time()
         return timestamp, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+
+    def compressed_offline_ticks(self, raw_ticks: int) -> int:
+        if raw_ticks <= 300:
+            return max(0, raw_ticks)
+        compressed = 300 + int((raw_ticks - 300) ** 0.5 * 20)
+        return min(compressed, 1200)
 
     def clear(self) -> None:
         for child in self.root.winfo_children():
@@ -590,7 +594,7 @@ class VirtualStockMarketApp:
                 interval = 3.0
             interval = min(max(interval, 0.5), 60.0)
             elapsed = max(0.0, login_ts - max(closed_ts, market_last_tick))
-            ticks = int(elapsed // interval)
+            ticks = self.compressed_offline_ticks(int(elapsed // interval))
             if ticks > 0:
                 advance_market(session.market_data, ticks=ticks)
         else:
@@ -800,7 +804,7 @@ class VirtualStockMarketApp:
         panes.add(detail, weight=3)
         self.asset_title = ttk.Label(detail, text=self.tr("select_asset"), font=("Arial", 18, "bold"))
         self.asset_title.pack(anchor="w")
-        self.asset_meta = ttk.Label(detail, text="")
+        self.asset_meta = ttk.Label(detail, text="", wraplength=620)
         self.asset_meta.pack(anchor="w", pady=(2, 8))
 
         range_frame = ttk.Frame(detail)
@@ -840,6 +844,7 @@ class VirtualStockMarketApp:
         self.portfolio_list.pack(fill=BOTH, expand=True)
         self.portfolio_list.bind("<Double-Button-1>", self.on_portfolio_double_click)
 
+        self.last_breaking_news_id = self.latest_breaking_news_id()
         self.refresh_all()
         self.bind_shortcuts()
         self.maybe_show_tutorial()
@@ -944,31 +949,98 @@ class VirtualStockMarketApp:
 
     def build_bank_tab(self, parent) -> None:
         parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(5, weight=1)
+        parent.rowconfigure(4, weight=1)
         self.bank_funding_type.set(self.funding_type_label("loan"))
         ttk.Label(parent, text=self.tr("bank"), font=("Arial", 20, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 10))
-        self.bank_risk_summary = ttk.Label(parent, text="", foreground=self.colors()["muted"], wraplength=900)
-        self.bank_risk_summary.grid(row=1, column=0, sticky="ew", pady=(0, 8))
 
-        form = ttk.LabelFrame(parent, text=self.tr("request_funding"), padding=14)
-        form.grid(row=2, column=0, sticky="ew", pady=(0, 12))
-        ttk.Label(form, text=self.tr("funding_type")).pack(side=LEFT)
+        overview = ttk.LabelFrame(parent, text=self.tr("bank_overview"), padding=12)
+        overview.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        for column in range(4):
+            overview.columnconfigure(column, weight=1)
+        ttk.Label(overview, text=self.tr("cash"), foreground=self.colors()["muted"]).grid(row=0, column=0, sticky="w")
+        self.bank_cash_value = ttk.Label(overview, text="", font=("Arial", 12, "bold"))
+        self.bank_cash_value.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        ttk.Label(overview, text=self.tr("debt"), foreground=self.colors()["muted"]).grid(row=0, column=1, sticky="w")
+        self.bank_debt_value = ttk.Label(overview, text="", font=("Arial", 12, "bold"))
+        self.bank_debt_value.grid(row=1, column=1, sticky="w", pady=(2, 0))
+        ttk.Label(overview, text=self.tr("next_payment"), foreground=self.colors()["muted"]).grid(row=0, column=2, sticky="w")
+        self.bank_next_payment_value = ttk.Label(overview, text="", font=("Arial", 12, "bold"), wraplength=250)
+        self.bank_next_payment_value.grid(row=1, column=2, sticky="w", pady=(2, 0))
+        ttk.Label(overview, text=self.tr("credit_available"), foreground=self.colors()["muted"]).grid(row=0, column=3, sticky="w")
+        self.bank_credit_value = ttk.Label(overview, text="", font=("Arial", 12, "bold"))
+        self.bank_credit_value.grid(row=1, column=3, sticky="w", pady=(2, 0))
+
+        actions = ttk.Frame(parent)
+        actions.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        actions.columnconfigure(0, weight=1)
+        actions.columnconfigure(1, weight=1)
+
+        funding_box = ttk.LabelFrame(actions, text=self.tr("quick_funding"), padding=14)
+        funding_box.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        funding_box.columnconfigure(1, weight=1)
+        ttk.Label(funding_box, text=self.tr("quick_funding_help"), foreground=self.colors()["muted"], wraplength=340).grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        ttk.Label(funding_box, text=self.tr("amount")).grid(row=1, column=0, sticky="w")
+        ttk.Entry(funding_box, textvariable=self.bank_amount, width=12).grid(row=1, column=1, sticky="ew", padx=6)
+        request_button = ttk.Button(funding_box, text=self.with_icon("＋", "get_cash"), command=self.request_simple_bank_funding)
+        request_button.grid(row=1, column=2, sticky="e")
+        self.add_tooltip(request_button, "tooltip_bank_request")
+
+        payment_box = ttk.LabelFrame(actions, text=self.tr("automatic_repayment"), padding=14)
+        payment_box.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        payment_box.columnconfigure(0, weight=1)
+        self.bank_next_payment_detail = ttk.Label(payment_box, text="", foreground=self.colors()["muted"], wraplength=340)
+        self.bank_next_payment_detail.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        pay_next_button = ttk.Button(payment_box, text=self.with_icon("✓", "pay_next_due"), command=self.repay_next_bank_debt)
+        pay_next_button.grid(row=1, column=0, sticky="w")
+        self.add_tooltip(pay_next_button, "tooltip_pay_next_due")
+
+        ttk.Label(parent, text=self.tr("debt_schedule"), font=("Arial", 13, "bold")).grid(row=3, column=0, sticky="w", pady=(0, 4))
+        loans_box = ttk.Frame(parent)
+        loans_box.grid(row=4, column=0, sticky="nsew")
+        loans_box.columnconfigure(0, weight=1)
+        loans_box.rowconfigure(1, weight=1)
+        ttk.Label(loans_box, text=self.tr("debt_schedule_header"), foreground=self.colors()["muted"]).grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self.bank_list = Listbox(loans_box, height=10, exportselection=False)
+        self.configure_listbox(self.bank_list)
+        self.bank_list.grid(row=1, column=0, sticky="nsew")
+
+        self.bank_advanced_button = ttk.Button(parent, command=self.toggle_bank_advanced_tools)
+        self.bank_advanced_button.grid(row=5, column=0, sticky="w", pady=(12, 8))
+        self.update_bank_advanced_button()
+
+        self.bank_advanced_frame = ttk.LabelFrame(parent, text=self.tr("advanced_bank_tools"), padding=14)
+        self.bank_advanced_frame.grid(row=6, column=0, sticky="ew")
+        self.bank_advanced_frame.columnconfigure(0, weight=1)
+        self.bank_risk_summary = ttk.Label(self.bank_advanced_frame, text="", foreground=self.colors()["muted"], wraplength=900)
+        self.bank_risk_summary.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+
+        advanced_funding = ttk.Frame(self.bank_advanced_frame)
+        advanced_funding.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        ttk.Label(advanced_funding, text=self.tr("advanced_funding")).pack(side=LEFT)
         ttk.Combobox(
-            form,
+            advanced_funding,
             textvariable=self.bank_funding_type,
             values=[self.funding_type_label(funding_type) for funding_type in LOAN_OPTIONS],
             state="readonly",
             width=10,
         ).pack(side=LEFT, padx=6)
-        ttk.Label(form, text=self.tr("amount")).pack(side=LEFT)
-        ttk.Entry(form, textvariable=self.bank_amount, width=10).pack(side=LEFT, padx=6)
-        request_button = ttk.Button(form, text=self.with_icon("＋", "request"), command=self.request_bank_funding)
-        request_button.pack(side=LEFT, padx=6)
-        self.add_tooltip(request_button, "tooltip_bank_request")
-        ttk.Label(form, text=self.tr("bank_help"), foreground=self.colors()["muted"]).pack(side=LEFT, padx=10)
+        ttk.Label(advanced_funding, text=self.tr("amount")).pack(side=LEFT)
+        ttk.Entry(advanced_funding, textvariable=self.bank_amount, width=10).pack(side=LEFT, padx=6)
+        advanced_request_button = ttk.Button(advanced_funding, text=self.with_icon("＋", "request"), command=self.request_bank_funding)
+        advanced_request_button.pack(side=LEFT, padx=6)
+        self.add_tooltip(advanced_request_button, "tooltip_bank_request")
+        ttk.Label(advanced_funding, text=self.tr("bank_help"), foreground=self.colors()["muted"]).pack(side=LEFT, padx=10)
 
-        risk_box = ttk.LabelFrame(parent, text=self.tr("risk_tools"), padding=14)
-        risk_box.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        repayment = ttk.Frame(self.bank_advanced_frame)
+        repayment.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        ttk.Label(repayment, text=self.tr("custom_repayment")).pack(side=LEFT)
+        ttk.Entry(repayment, textvariable=self.bank_repayment, width=10).pack(side=LEFT, padx=6)
+        repay_button = ttk.Button(repayment, text=self.with_icon("✓", "repay_selected"), command=self.repay_selected_bank_debt)
+        repay_button.pack(side=LEFT)
+        self.add_tooltip(repay_button, "tooltip_repay")
+
+        risk_box = ttk.Frame(self.bank_advanced_frame)
+        risk_box.grid(row=3, column=0, sticky="ew", pady=(0, 10))
         ttk.Label(risk_box, text=self.tr("margin_amount")).pack(side=LEFT)
         ttk.Entry(risk_box, textvariable=self.margin_amount, width=9).pack(side=LEFT, padx=5)
         margin_button = ttk.Button(risk_box, text=self.with_icon("＋", "request_margin"), command=self.request_margin)
@@ -980,8 +1052,8 @@ class VirtualStockMarketApp:
         repay_margin_button.pack(side=LEFT, padx=5)
         self.add_tooltip(repay_margin_button, "tooltip_repay_margin")
 
-        short_box = ttk.Frame(parent)
-        short_box.grid(row=4, column=0, sticky="ew", pady=(0, 12))
+        short_box = ttk.Frame(self.bank_advanced_frame)
+        short_box.grid(row=4, column=0, sticky="ew", pady=(0, 10))
         ttk.Label(short_box, text=self.tr("short_symbol")).pack(side=LEFT)
         ttk.Entry(short_box, textvariable=self.short_symbol, width=10).pack(side=LEFT, padx=5)
         ttk.Label(short_box, text=self.tr("qty")).pack(side=LEFT)
@@ -998,22 +1070,29 @@ class VirtualStockMarketApp:
         insurance_button.pack(side=LEFT, padx=5)
         self.add_tooltip(insurance_button, "tooltip_insurance")
 
-        loans_box = ttk.Frame(parent)
-        loans_box.grid(row=5, column=0, sticky="nsew")
-        loans_box.columnconfigure(0, weight=1)
-        loans_box.rowconfigure(1, weight=1)
-        repayment = ttk.Frame(loans_box)
-        repayment.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ttk.Label(repayment, text=self.tr("repayment_amount")).pack(side=LEFT)
-        ttk.Entry(repayment, textvariable=self.bank_repayment, width=10).pack(side=LEFT, padx=6)
-        repay_button = ttk.Button(repayment, text=self.with_icon("✓", "repay_selected"), command=self.repay_selected_bank_debt)
-        repay_button.pack(side=LEFT)
-        self.add_tooltip(repay_button, "tooltip_repay")
-        ttk.Label(loans_box, text=self.tr("bank_header"), foreground=self.colors()["muted"]).grid(row=1, column=0, sticky="w", pady=(0, 4))
-        self.bank_list = Listbox(loans_box, height=14, exportselection=False)
-        self.configure_listbox(self.bank_list)
-        self.bank_list.grid(row=2, column=0, sticky="nsew")
-        loans_box.rowconfigure(2, weight=1)
+        ttk.Label(self.bank_advanced_frame, text=self.tr("risk_positions"), foreground=self.colors()["muted"]).grid(row=5, column=0, sticky="w", pady=(0, 4))
+        self.bank_risk_list = Listbox(self.bank_advanced_frame, height=5, exportselection=False)
+        self.configure_listbox(self.bank_risk_list)
+        self.bank_risk_list.grid(row=6, column=0, sticky="ew")
+        if not self.bank_advanced_visible.get():
+            self.bank_advanced_frame.grid_remove()
+
+    def update_bank_advanced_button(self) -> None:
+        if not hasattr(self, "bank_advanced_button"):
+            return
+        if self.bank_advanced_visible.get():
+            self.bank_advanced_button.configure(text=self.with_icon("▾", "hide_advanced"))
+        else:
+            self.bank_advanced_button.configure(text=self.with_icon("▸", "show_advanced"))
+
+    def toggle_bank_advanced_tools(self) -> None:
+        self.bank_advanced_visible.set(not self.bank_advanced_visible.get())
+        if hasattr(self, "bank_advanced_frame"):
+            if self.bank_advanced_visible.get():
+                self.bank_advanced_frame.grid()
+            else:
+                self.bank_advanced_frame.grid_remove()
+        self.update_bank_advanced_button()
 
     def build_orders_tab(self, parent) -> None:
         parent.columnconfigure(0, weight=1)
@@ -1045,12 +1124,27 @@ class VirtualStockMarketApp:
         parent.rowconfigure(1, weight=1)
         controls = ttk.Frame(parent)
         controls.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        controls.columnconfigure(3, weight=1)
         ttk.Label(controls, text=self.tr("filter")).pack(side=LEFT)
         news_filter_box = ttk.Combobox(controls, textvariable=self.news_filter, values=["All", "Market", "Stock", "Crypto", "FNT", "Commodity", "Fund"], state="readonly", width=14)
         news_filter_box.pack(side=LEFT, padx=6)
         news_filter_box.bind("<<ComboboxSelected>>", lambda _event: self.refresh_news())
+        ttk.Label(controls, text=self.tr("view")).pack(side=LEFT, padx=(10, 4))
+        current_view = self.news_view_from_label(self.news_view.get())
+        self.news_view.set(self.news_view_label(current_view))
+        news_view_box = ttk.Combobox(controls, textvariable=self.news_view, values=[self.news_view_label(view) for view in NEWS_VIEWS], state="readonly", width=14)
+        news_view_box.pack(side=LEFT, padx=6)
+        news_view_box.bind("<<ComboboxSelected>>", lambda _event: self.refresh_news())
+        ttk.Label(controls, text=self.tr("search")).pack(side=LEFT, padx=(10, 4))
+        news_search_entry = ttk.Entry(controls, textvariable=self.news_search, width=22)
+        news_search_entry.pack(side=LEFT, padx=6)
+        news_search_entry.bind("<Return>", lambda _event: self.refresh_news())
+        search_button = ttk.Button(controls, text=self.with_icon("⌕", "search"), command=self.refresh_news)
+        search_button.pack(side=LEFT)
+        clear_button = ttk.Button(controls, text=self.tr("clear"), command=self.clear_news_search)
+        clear_button.pack(side=LEFT, padx=(4, 0))
         news_refresh_button = ttk.Button(controls, text=self.with_icon("↻", "refresh"), command=self.refresh_news)
-        news_refresh_button.pack(side=LEFT)
+        news_refresh_button.pack(side=LEFT, padx=(4, 0))
         self.add_tooltip(news_refresh_button, "tooltip_news_refresh")
 
         panes = ttk.PanedWindow(parent, orient="horizontal")
@@ -1082,9 +1176,19 @@ class VirtualStockMarketApp:
         self.news_body.grid(row=3, column=0, sticky="ew")
         self.news_insight = ttk.Label(detail_frame, text="", foreground=self.colors()["muted"], wraplength=560)
         self.news_insight.grid(row=4, column=0, sticky="ew", pady=(10, 8))
-        self.news_select_button = ttk.Button(detail_frame, text=self.with_icon("↪", "open_asset"), command=self.select_news_asset)
-        self.news_select_button.grid(row=5, column=0, sticky="w")
+        self.news_source_reputation = ttk.Label(detail_frame, text="", foreground=self.colors()["muted"], wraplength=560)
+        self.news_source_reputation.grid(row=5, column=0, sticky="ew", pady=(0, 6))
+        self.news_impact_timeline = ttk.Label(detail_frame, text="", foreground=self.colors()["muted"], wraplength=560)
+        self.news_impact_timeline.grid(row=6, column=0, sticky="ew", pady=(0, 8))
+        news_actions = ttk.Frame(detail_frame)
+        news_actions.grid(row=7, column=0, sticky="w")
+        self.news_select_button = ttk.Button(news_actions, text=self.with_icon("↪", "open_asset"), command=self.select_news_asset)
+        self.news_select_button.pack(side=LEFT)
         self.add_tooltip(self.news_select_button, "tooltip_open_asset")
+        self.news_bookmark_button = ttk.Button(news_actions, text=self.with_icon("★", "bookmark"), command=self.toggle_news_bookmark)
+        self.news_bookmark_button.pack(side=LEFT, padx=(6, 0))
+        self.news_unread_button = ttk.Button(news_actions, text=self.with_icon("•", "mark_unread"), command=self.mark_selected_news_unread)
+        self.news_unread_button.pack(side=LEFT, padx=(6, 0))
 
     def build_leaderboard_tab(self, parent) -> None:
         parent.columnconfigure(0, weight=1)
@@ -1139,9 +1243,6 @@ class VirtualStockMarketApp:
         dark_mode_check = ttk.Checkbutton(appearance_box, text=self.with_icon("◐", "dark_mode"), variable=self.dark_mode, command=self.apply_settings_change)
         dark_mode_check.pack(anchor="w")
         self.add_tooltip(dark_mode_check, "tooltip_dark_mode")
-        sound_check = ttk.Checkbutton(appearance_box, text=self.with_icon("♪", "sound_effects"), variable=self.sound_effects_enabled, command=self.apply_settings_change)
-        sound_check.pack(anchor="w", pady=(6, 0))
-        self.add_tooltip(sound_check, "tooltip_sound_effects")
 
         language_box = ttk.LabelFrame(content, text=self.tr("language"), padding=14)
         language_box.grid(row=2, column=0, sticky="ew", pady=(0, 12))
@@ -1159,8 +1260,18 @@ class VirtualStockMarketApp:
         ).pack(anchor="w")
         ttk.Label(system_box, text=f"Data: {DATA_DIR}", foreground=self.colors()["muted"]).pack(anchor="w", pady=(4, 0))
 
+        data_box = ttk.LabelFrame(content, text=self.tr("data_management"), padding=14)
+        data_box.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+        ttk.Label(data_box, text=self.tr("data_management_help"), wraplength=760, foreground=self.colors()["muted"]).pack(anchor="w", pady=(0, 8))
+        data_actions = ttk.Frame(data_box)
+        data_actions.pack(anchor="w", fill=X)
+        ttk.Button(data_actions, text=self.with_icon("⇧", "export_save"), command=self.export_save_file).pack(side=LEFT, padx=(0, 6))
+        ttk.Button(data_actions, text=self.with_icon("⇩", "import_save"), command=self.import_save_file).pack(side=LEFT, padx=6)
+        ttk.Button(data_actions, text=self.with_icon("↻", "reset_market"), command=self.reset_market_data).pack(side=LEFT, padx=6)
+        ttk.Button(data_actions, text=self.with_icon("⌫", "reset_account_progress"), command=self.reset_account_progress).pack(side=LEFT, padx=6)
+
         simulation_box = ttk.LabelFrame(content, text=self.tr("simulation"), padding=14)
-        simulation_box.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+        simulation_box.grid(row=5, column=0, sticky="ew", pady=(12, 0))
         if self.show_speed_controls():
             ttk.Label(simulation_box, text=self.tr("speed_preset")).pack(anchor="w")
             ttk.Combobox(simulation_box, textvariable=self.speed_preset, values=["Slow", "Normal", "Fast", "Very Fast"], state="readonly", width=16).pack(anchor="w", pady=(2, 8))
@@ -1173,7 +1284,7 @@ class VirtualStockMarketApp:
         self.add_tooltip(simulation_button, "tooltip_simulation_settings")
 
         credits_box = ttk.LabelFrame(content, text=self.tr("credits"), padding=14)
-        credits_box.grid(row=5, column=0, sticky="ew", pady=(12, 24))
+        credits_box.grid(row=6, column=0, sticky="ew", pady=(12, 24))
         ttk.Label(credits_box, text=self.tr("credits_body"), wraplength=760, justify=LEFT, foreground=self.colors()["muted"]).pack(anchor="w")
 
     def apply_settings_change(self) -> None:
@@ -1213,6 +1324,113 @@ class VirtualStockMarketApp:
             self.apply_live_speed()
         self.session.save()
         self.status.set("Simulation settings updated.")
+
+    def export_save_file(self) -> None:
+        default_name = f"virtual_stock_market_save_{time.strftime('%Y%m%d_%H%M%S')}.json"
+        path = filedialog.asksaveasfilename(
+            title=self.tr("export_save"),
+            initialfile=default_name,
+            defaultextension=".json",
+            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        self.session.save()
+        package = {
+            "format": "VirtualStockMarketSave",
+            "version": 1,
+            "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "users": load_json(USERS_FILE, {"users": {}}),
+            "market": load_json(MARKET_FILE, {"last_tick": time.time(), "assets": generate_market()}),
+            "app_settings": load_json(APP_SETTINGS_FILE, {"remembered_username": ""}),
+        }
+        try:
+            save_json(Path(path), package)
+        except OSError as exc:
+            messagebox.showerror(self.tr("export_failed"), str(exc))
+            return
+        self.status.set(self.tr("export_complete"))
+
+    def import_save_file(self) -> None:
+        path = filedialog.askopenfilename(
+            title=self.tr("import_save"),
+            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        package = load_json(Path(path), {})
+        if package.get("format") != "VirtualStockMarketSave" or not isinstance(package.get("users"), dict) or not isinstance(package.get("market"), dict):
+            messagebox.showerror(self.tr("import_failed"), self.tr("invalid_save_file"))
+            return
+        if not messagebox.askyesno(self.tr("import_save"), self.tr("confirm_import_save")):
+            return
+        self.stop_live_updates()
+        users = normalize_users_data(package.get("users", {"users": {}}))
+        market = normalize_market_data(package.get("market", {"last_tick": time.time(), "assets": generate_market()}))
+        app_settings = package.get("app_settings", {"remembered_username": ""})
+        if not isinstance(app_settings, dict):
+            app_settings = {"remembered_username": ""}
+        try:
+            save_json(USERS_FILE, users)
+            save_json(MARKET_FILE, market)
+            save_json(APP_SETTINGS_FILE, app_settings)
+        except OSError as exc:
+            messagebox.showerror(self.tr("import_failed"), str(exc))
+            return
+        username = self.session.username if self.session else ""
+        if username and username in users.get("users", {}):
+            self.session = self.load_session(username)
+            self.load_user_preferences()
+            self.status.set(self.tr("import_complete"))
+            self.show_dashboard()
+        else:
+            self.session = None
+            self.status.set(self.tr("import_complete_login"))
+            self.show_login()
+
+    def reset_market_data(self) -> None:
+        if not messagebox.askyesno(self.tr("reset_market"), self.tr("confirm_reset_market")):
+            return
+        self.stop_live_updates()
+        settings = {}
+        if self.session:
+            settings = dict(self.session.market_data.get("settings", {}))
+        market = normalize_market_data({"last_tick": time.time(), "assets": generate_market(), "settings": settings})
+        save_json(MARKET_FILE, market)
+        if self.session:
+            self.session.market_data = market
+            self.status.set(self.tr("market_reset_complete"))
+            self.show_dashboard()
+        else:
+            self.status.set(self.tr("market_reset_complete"))
+
+    def reset_account_progress(self) -> None:
+        if not self.session:
+            return
+        if not messagebox.askyesno(self.tr("reset_account_progress"), self.tr("confirm_reset_account_progress")):
+            return
+        user = self.session.user
+        user["cash"] = STARTING_CURRENCY
+        user["portfolio"] = {}
+        user["transactions"] = []
+        user["orders"] = []
+        user["loans"] = []
+        user["credit_score"] = 650
+        user["margin_debt"] = 0.0
+        user["short_positions"] = {}
+        user["insurance_policies"] = []
+        user["liquidations"] = []
+        user["achievements"] = {}
+        user["read_news"] = []
+        user["bookmarked_news"] = []
+        user["news_read_count"] = 0
+        user["net_worth_history"] = []
+        user["last_offline_summary"] = {}
+        self.selected_symbol.set("")
+        self.selected_news_id = ""
+        self.session.save()
+        self.status.set(self.tr("account_progress_reset_complete"))
+        self.show_dashboard()
 
     def change_password(self) -> None:
         current = simpledialog.askstring("Change Password", "Current password:", show="*")
@@ -1284,6 +1502,7 @@ class VirtualStockMarketApp:
             return
         self.process_bank_risk()
         self.record_net_worth_snapshot()
+        self.process_daily_quests()
         self.session.save()
         self.refresh_account()
         self.refresh_market_list()
@@ -1344,6 +1563,78 @@ class VirtualStockMarketApp:
             if name == username:
                 return rank
         return None
+
+    def daily_quest_stats(self) -> dict:
+        user = self.session.user
+        transactions = user.get("transactions", [])
+        trade_actions = {"BUY", "SELL", "LIMIT BUY", "LIMIT SELL", "STOP LOSS"}
+        return {
+            "trade_count": sum(1 for txn in transactions if txn.get("action") in trade_actions),
+            "buy_count": sum(1 for txn in transactions if txn.get("action") in {"BUY", "LIMIT BUY"}),
+            "sell_count": sum(1 for txn in transactions if txn.get("action") in {"SELL", "LIMIT SELL", "STOP LOSS"}),
+            "news_read_count": int(user.get("news_read_count", 0) or 0),
+            "order_activity": len(user.get("orders", [])) + sum(1 for txn in transactions if txn.get("action") in {"LIMIT BUY", "LIMIT SELL", "STOP LOSS"}),
+            "portfolio_count": len(user.get("portfolio", {})),
+            "net_worth": self.account_net_worth(user),
+        }
+
+    def ensure_daily_quests(self) -> None:
+        user = self.session.user
+        today = time.strftime("%Y-%m-%d")
+        if user.get("daily_quest_day") == today and user.get("daily_quests"):
+            return
+        stats = self.daily_quest_stats()
+        rng = random.Random(f"{self.session.username}:{today}")
+        templates = [
+            ("daily_quest_trade", "trade_count", 2, 4.0),
+            ("daily_quest_buy", "buy_count", 1, 3.0),
+            ("daily_quest_sell", "sell_count", 1, 3.0),
+            ("daily_quest_news", "news_read_count", 2, 3.0),
+            ("daily_quest_order", "order_activity", 1, 4.0),
+            ("daily_quest_hold", "portfolio_count", 1, 4.0),
+            ("daily_quest_net_worth", "net_worth", 5, 5.0),
+        ]
+        quests = []
+        for label_key, metric, target, reward in rng.sample(templates, 3):
+            quests.append(
+                {
+                    "label_key": label_key,
+                    "metric": metric,
+                    "target": target,
+                    "reward": reward,
+                    "start_value": stats.get(metric, 0),
+                    "claimed": False,
+                }
+            )
+        user["daily_quest_day"] = today
+        user["daily_quests"] = quests
+
+    def quest_progress(self, quest: dict, stats: dict | None = None) -> float:
+        stats = stats or self.daily_quest_stats()
+        current = float(stats.get(quest.get("metric", ""), 0) or 0)
+        start = float(quest.get("start_value", 0) or 0)
+        return max(0.0, current - start)
+
+    def process_daily_quests(self) -> None:
+        self.ensure_daily_quests()
+        user = self.session.user
+        stats = self.daily_quest_stats()
+        rewards = 0.0
+        completed = 0
+        for quest in user.get("daily_quests", []):
+            if quest.get("claimed"):
+                continue
+            if self.quest_progress(quest, stats) >= float(quest.get("target", 0) or 0):
+                reward = float(quest.get("reward", 0.0) or 0.0)
+                quest["claimed"] = True
+                quest["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                user["cash"] = round(user.get("cash", 0) + reward, 2)
+                self.record_transaction("QUEST", "DAILY", 1, reward)
+                rewards += reward
+                completed += 1
+        if completed:
+            self.status.set(self.tr("daily_quest_rewarded", count=completed, amount=money(rewards)))
+            self.trigger_effect("achievement", "QUEST")
 
     def unlock_achievement(self, achievement_id: str, unlocked: list[str]) -> None:
         achievements = self.session.user.setdefault("achievements", {})
@@ -1406,7 +1697,6 @@ class VirtualStockMarketApp:
         if unlocked:
             names = ", ".join(self.tr(next(title for ach_id, title, _desc in ACHIEVEMENTS if ach_id == achievement_id)) for achievement_id in unlocked)
             self.status.set(self.tr("achievement_unlocked", names=names))
-            self.play_sound("achievement")
             self.flash_status("achievement")
             self.confetti_effect()
             self.session.save()
@@ -1461,6 +1751,23 @@ class VirtualStockMarketApp:
             f"{self.tr('orders')}: {self.tr('active_count', count=active_orders)}",
             f"{self.tr('trading_mode')}: {self.trading_mode_label(self.current_trading_mode())}",
         ]
+        macro = self.session.market_data.get("macro", {})
+        if macro:
+            summary_lines.append(
+                f"{self.tr('macro')}: {self.tr('inflation')} {macro.get('inflation', 0):.2f}% | "
+                f"{self.tr('rates')} {macro.get('interest_rate', 0):.2f}% | "
+                f"{self.tr('oil')} {money(macro.get('oil_price', 0))}"
+            )
+        self.ensure_daily_quests()
+        quest_stats = self.daily_quest_stats()
+        summary_lines.append("")
+        summary_lines.append(self.tr("daily_quests"))
+        for quest in self.session.user.get("daily_quests", []):
+            progress = min(self.quest_progress(quest, quest_stats), float(quest.get("target", 0) or 0))
+            target = float(quest.get("target", 0) or 0)
+            marker = "✓" if quest.get("claimed") else "○"
+            reward = money(float(quest.get("reward", 0) or 0))
+            summary_lines.append(f"{marker} {self.tr(quest.get('label_key', 'daily_quest_trade'))}: {progress:g}/{target:g} ({reward})")
         self.dashboard_summary.configure(text="\n".join(summary_lines))
         self.draw_allocation_chart(user)
 
@@ -1480,8 +1787,8 @@ class VirtualStockMarketApp:
         if not feed:
             self.dashboard_news.insert(END, self.tr("no_matching_news"))
         for event in feed[:6]:
-            warning = "!" if event.get("misleading") else " "
-            self.dashboard_news.insert(END, f"{warning} {event.get('symbol', 'MARKET'):<6} {event.get('title', '')[:70]}")
+            warning = "BREAK" if event.get("breaking") else "!" if event.get("misleading") else " "
+            self.dashboard_news.insert(END, f"{warning:<5} {event.get('symbol', 'MARKET'):<6} {event.get('title', '')[:68]}")
 
         self.dashboard_alerts.delete(0, END)
         alerts = []
@@ -1513,7 +1820,32 @@ class VirtualStockMarketApp:
         self.dashboard_news_quality.insert(END, f"{self.tr('average_credibility')}: {avg_credibility * 100:.0f}%")
         self.dashboard_news_quality.insert(END, f"{self.tr('reliable_sources')}: {reliable}/{len(recent)}")
         self.dashboard_news_quality.insert(END, f"{self.tr('possible_hype')}: {misleading}/{len(recent)}")
+        reputation = self.source_reputation_summary()
+        if reputation:
+            best = reputation[0]
+            self.dashboard_news_quality.insert(END, self.tr("top_source", source=best["source"], hit_rate=best["hit_rate"], resolved=best["resolved"]))
+            if len(reputation) > 1:
+                watch = reputation[-1]
+                self.dashboard_news_quality.insert(END, self.tr("watch_source", source=watch["source"], hit_rate=watch["hit_rate"], resolved=watch["resolved"]))
         self.dashboard_news_quality.insert(END, self.tr("news_quality_hint"))
+
+    def source_reputation_summary(self) -> list[dict]:
+        rows = []
+        for source, row in self.session.market_data.get("source_reputation", {}).items():
+            resolved = int(row.get("resolved", 0) or 0)
+            if not resolved:
+                continue
+            helped = int(row.get("helped", 0) or 0)
+            rows.append(
+                {
+                    "source": source,
+                    "resolved": resolved,
+                    "helped": helped,
+                    "hit_rate": helped / resolved * 100,
+                    "credibility": (float(row.get("credibility_total", 0.0) or 0.0) / resolved) * 100,
+                }
+            )
+        return sorted(rows, key=lambda item: (item["hit_rate"], item["resolved"]), reverse=True)
 
     def loan_due_date(self, loan: dict) -> tuple[str, int] | None:
         self.ensure_loan_terms(loan)
@@ -1602,40 +1934,50 @@ class VirtualStockMarketApp:
     def refresh_market_list(self) -> None:
         category = self.filter_var.get()
         previous = self.selected_symbol.get()
-        self.market_list.delete(0, END)
-        self.market_change_list.delete(0, END)
-        self.visible_assets = []
-        assets = list(self.get_assets())
-        sort_key = self.sort_key_from_label(self.market_sort.get())
-        if sort_key == "name":
-            assets.sort(key=lambda item: item.get("name", ""))
-        elif sort_key == "price":
-            assets.sort(key=lambda item: item.get("price", 0), reverse=True)
-        elif sort_key == "change":
-            assets.sort(key=lambda item: self.market_change_percent(item), reverse=True)
-        else:
-            assets.sort(key=lambda item: item.get("symbol", ""))
-        for item in assets:
-            if category != "All" and item["category"] != category:
-                continue
-            self.visible_assets.append(item)
-            history = item.get("history", [item["price"]])
-            previous_price = history[-2] if len(history) > 1 else item["price"]
-            change = ((item["price"] - previous_price) / previous_price * 100) if previous_price else 0
-            self.market_list.insert(END, f"{item['symbol']:<6} {item['name'][:24]:<24} {money(item['price']):>11}")
-            self.market_change_list.insert(END, f"{change:+.2f}%")
-            color = "#188038" if change >= 0 else "#d1242f"
-            self.market_change_list.itemconfig(self.market_change_list.size() - 1, foreground=color)
-        if previous:
-            for idx, item in enumerate(self.visible_assets):
-                if item["symbol"] == previous:
-                    self.market_list.selection_set(idx)
-                    self.market_change_list.selection_set(idx)
-                    self.market_list.see(idx)
-                    self.market_change_list.see(idx)
-                    break
+        self.refreshing_market_list = True
+        try:
+            self.market_list.delete(0, END)
+            self.market_change_list.delete(0, END)
+            self.visible_assets = []
+            assets = list(self.get_assets())
+            sort_key = self.sort_key_from_label(self.market_sort.get())
+            if sort_key == "name":
+                assets.sort(key=lambda item: item.get("name", ""))
+            elif sort_key == "price":
+                assets.sort(key=lambda item: item.get("price", 0), reverse=True)
+            elif sort_key == "change":
+                assets.sort(key=lambda item: self.market_change_percent(item), reverse=True)
+            else:
+                assets.sort(key=lambda item: item.get("symbol", ""))
+            for item in assets:
+                if category != "All" and item["category"] != category:
+                    continue
+                self.visible_assets.append(item)
+                history = item.get("history", [item["price"]])
+                previous_price = history[-2] if len(history) > 1 else item["price"]
+                change = ((item["price"] - previous_price) / previous_price * 100) if previous_price else 0
+                self.market_list.insert(END, f"{item['symbol']:<6} {item['name'][:24]:<24} {money(item['price']):>11}")
+                self.market_change_list.insert(END, f"{change:+.2f}%")
+                color = "#188038" if change >= 0 else "#d1242f"
+                self.market_change_list.itemconfig(self.market_change_list.size() - 1, foreground=color)
+            if previous:
+                for idx, item in enumerate(self.visible_assets):
+                    if item["symbol"] == previous:
+                        self.market_list.selection_set(idx)
+                        self.market_change_list.selection_set(idx)
+                        self.market_list.activate(idx)
+                        self.market_change_list.activate(idx)
+                        self.market_list.see(idx)
+                        self.market_change_list.see(idx)
+                        break
+        finally:
+            self.refreshing_market_list = False
 
     def refresh_portfolio(self) -> None:
+        previous_symbol = ""
+        selection = self.portfolio_list.curselection()
+        if selection and selection[0] < len(self.portfolio_symbols):
+            previous_symbol = self.portfolio_symbols[selection[0]]
         self.portfolio_list.delete(0, END)
         self.portfolio_symbols = []
         portfolio = self.session.user.get("portfolio", {})
@@ -1647,6 +1989,11 @@ class VirtualStockMarketApp:
             if item:
                 self.portfolio_symbols.append(symbol)
                 self.portfolio_list.insert(END, f"{symbol:<6} {qty:>8.3f} units   value {money(qty * item['price'])}")
+        if previous_symbol in self.portfolio_symbols:
+            idx = self.portfolio_symbols.index(previous_symbol)
+            self.portfolio_list.selection_set(idx)
+            self.portfolio_list.activate(idx)
+            self.portfolio_list.see(idx)
 
     def refresh_transactions(self) -> None:
         if not hasattr(self, "transaction_list"):
@@ -1668,6 +2015,33 @@ class VirtualStockMarketApp:
         if not hasattr(self, "bank_list"):
             return
         user = self.session.user
+        loans = user.get("loans", [])
+        selected_loan_id = ""
+        selection = self.bank_list.curselection()
+        if selection and selection[0] < len(loans):
+            selected_loan_id = self.loan_identity(loans[selection[0]])
+        for loan in loans:
+            self.ensure_loan_terms(loan)
+        bank_debt = self.total_bank_debt(user)
+        credit_available = max(0.0, self.credit_limit(user) - self.used_credit(user))
+        next_index = self.next_due_loan_index(loans)
+        if hasattr(self, "bank_cash_value"):
+            self.bank_cash_value.configure(text=money(user.get("cash", 0)))
+            self.bank_debt_value.configure(text=money(bank_debt))
+            self.bank_credit_value.configure(text=money(credit_available))
+            if next_index is None:
+                self.bank_next_payment_value.configure(text=self.tr("no_payment_due"))
+                if hasattr(self, "bank_next_payment_detail"):
+                    self.bank_next_payment_detail.configure(text=self.tr("no_payment_due"))
+            else:
+                next_loan = loans[next_index]
+                target = self.suggested_bank_payment(next_loan, cap_to_cash=False)
+                due = self.loan_due_date(next_loan)
+                due_label = due[0] if due else self.tr("unknown_due")
+                label = f"{money(target)} | {due_label}"
+                self.bank_next_payment_value.configure(text=label)
+                if hasattr(self, "bank_next_payment_detail"):
+                    self.bank_next_payment_detail.configure(text=f"{self.tr('pay_next_due_help')} {label}")
         if hasattr(self, "bank_risk_summary"):
             self.bank_risk_summary.configure(
                 text=(
@@ -1679,31 +2053,47 @@ class VirtualStockMarketApp:
                 )
             )
         self.bank_list.delete(0, END)
-        loans = user.get("loans", [])
-        if not loans and not user.get("short_positions") and not user.get("insurance_policies") and not user.get("margin_debt", 0):
+        if not loans:
             self.bank_list.insert(END, self.tr("no_bank_debt"))
-            return
         for loan in loans:
             due = loan.get("due_at", self.tr("unknown_due"))
             self.bank_list.insert(
                 END,
                 (
-                    f"{loan.get('created_at', '')}  {self.funding_type_label(loan.get('type', 'loan')):<10} "
-                    f"{self.tr('principal')} {money(loan.get('principal', 0))}  "
-                    f"{self.tr('interest')} {loan.get('interest_rate', 0) * 100:.1f}%  "
-                    f"{self.tr('minimum')} {money(loan.get('minimum_payment', 0))}  {self.tr('due')} {due}  "
-                    f"{self.tr('balance')} {money(loan.get('balance', 0))}"
+                    f"{self.funding_type_label(loan.get('type', 'loan')):<10} "
+                    f"{money(loan.get('balance', 0)):>10}  "
+                    f"{self.tr('minimum')} {money(loan.get('minimum_payment', 0)):<10}  "
+                    f"{self.tr('due')} {due:<12}  "
+                    f"{self.tr('interest')} {loan.get('interest_rate', 0) * 100:.1f}%"
                 ),
             )
+        if selected_loan_id:
+            for idx, loan in enumerate(loans):
+                if self.loan_identity(loan) == selected_loan_id:
+                    self.bank_list.selection_set(idx)
+                    self.bank_list.activate(idx)
+                    self.bank_list.see(idx)
+                    break
+        if hasattr(self, "bank_risk_list"):
+            self.refresh_bank_risk_list(user)
+
+    def refresh_bank_risk_list(self, user: dict) -> None:
+        self.bank_risk_list.delete(0, END)
+        has_risk_item = False
         if user.get("margin_debt", 0):
-            self.bank_list.insert(END, f"MARGIN      {self.tr('margin_debt')}: {money(user.get('margin_debt', 0))}  {self.tr('margin_available')}: {money(self.max_margin_available(user))}")
+            has_risk_item = True
+            self.bank_risk_list.insert(END, f"MARGIN      {self.tr('margin_debt')}: {money(user.get('margin_debt', 0))}  {self.tr('margin_available')}: {money(self.max_margin_available(user))}")
         for symbol, position in sorted(user.get("short_positions", {}).items()):
             item = next((asset_item for asset_item in self.get_assets() if asset_item["symbol"] == symbol), None)
             current = item["price"] if item else position.get("entry_price", 0)
             liability = current * position.get("quantity", 0)
-            self.bank_list.insert(END, f"SHORT       {symbol:<6} {self.tr('qty')} {position.get('quantity', 0):.3f} {self.tr('entry')} {money(position.get('entry_price', 0))} {self.tr('liability')} {money(liability)}")
+            has_risk_item = True
+            self.bank_risk_list.insert(END, f"SHORT       {symbol:<6} {self.tr('qty')} {position.get('quantity', 0):.3f} {self.tr('entry')} {money(position.get('entry_price', 0))} {self.tr('liability')} {money(liability)}")
         for policy in user.get("insurance_policies", []):
-            self.bank_list.insert(END, f"{self.tr('hedge').upper():<11} {policy.get('symbol', ''):<6} {self.tr('floor')} {money(policy.get('floor_price', 0))} {self.tr('expires')} {policy.get('expires_at', '')}")
+            has_risk_item = True
+            self.bank_risk_list.insert(END, f"{self.tr('hedge').upper():<11} {policy.get('symbol', ''):<6} {self.tr('floor')} {money(policy.get('floor_price', 0))} {self.tr('expires')} {policy.get('expires_at', '')}")
+        if not has_risk_item:
+            self.bank_risk_list.insert(END, self.tr("no_risk_positions"))
 
     def loan_terms(self, funding_type: str, amount: float, balance: float) -> dict:
         days = 7 if funding_type == "credit" else 14
@@ -1731,6 +2121,28 @@ class VirtualStockMarketApp:
         loan.setdefault("minimum_payment", round(max(1.0, loan.get("balance", 0) * MINIMUM_PAYMENT_RATE), 2))
         loan.setdefault("late_fee_applied", False)
         loan.setdefault("defaulted", False)
+
+    def loan_identity(self, loan: dict) -> str:
+        return f"{loan.get('created_at', '')}|{loan.get('type', '')}|{loan.get('principal', '')}|{loan.get('interest_rate', '')}"
+
+    def next_due_loan_index(self, loans: list[dict]) -> int | None:
+        candidates = []
+        for index, loan in enumerate(loans):
+            if loan.get("balance", 0) <= 0:
+                continue
+            self.ensure_loan_terms(loan)
+            candidates.append((loan.get("due_at_ts", float("inf")), index))
+        if not candidates:
+            return None
+        return min(candidates)[1]
+
+    def suggested_bank_payment(self, loan: dict, cap_to_cash: bool = True) -> float:
+        balance = max(0.0, float(loan.get("balance", 0.0) or 0.0))
+        minimum = max(0.0, float(loan.get("minimum_payment", 0.0) or 0.0))
+        target = min(balance, minimum if minimum > 0 else balance)
+        if cap_to_cash:
+            target = min(target, max(0.0, float(self.session.user.get("cash", 0.0) or 0.0)))
+        return round(target, 2)
 
     def adjust_credit_score(self, delta: int) -> None:
         user = self.session.user
@@ -1784,7 +2196,7 @@ class VirtualStockMarketApp:
                     user["cash"] = round(user.get("cash", 0) + payout, 2)
                     self.record_transaction("INSURANCE PAYOUT", symbol, covered_qty, payout / covered_qty)
                     self.status.set(self.tr("insurance_payout", symbol=symbol, amount=money(payout)))
-                    self.trigger_effect("success", "HEDGE", "success")
+                    self.trigger_effect("success", "HEDGE")
                     changed = True
                 continue
             active_policies.append(policy)
@@ -1856,8 +2268,12 @@ class VirtualStockMarketApp:
             del user["liquidations"][:-25]
             self.adjust_credit_score(-60)
             self.status.set(self.tr("liquidation_triggered"))
-            self.trigger_effect("risk", "RISK", "risk")
+            self.trigger_effect("risk", "RISK")
         return changed
+
+    def request_simple_bank_funding(self) -> None:
+        self.bank_funding_type.set(self.funding_type_label("loan"))
+        self.request_bank_funding()
 
     def request_bank_funding(self) -> None:
         funding_type = self.funding_type_from_label(self.bank_funding_type.get())
@@ -1866,15 +2282,15 @@ class VirtualStockMarketApp:
         try:
             amount = float(self.bank_amount.get())
         except ValueError:
-            self.trigger_effect("error", "ERROR", "error")
+            self.trigger_effect("error", "ERROR")
             messagebox.showerror(self.tr("bank_request_rejected"), self.tr("amount_must_be_numeric"))
             return
         if amount <= 0:
-            self.trigger_effect("error", "ERROR", "error")
+            self.trigger_effect("error", "ERROR")
             messagebox.showerror(self.tr("bank_request_rejected"), self.tr("amount_must_be_positive"))
             return
         if amount > 1000:
-            self.trigger_effect("error", "LIMIT", "error")
+            self.trigger_effect("error", "LIMIT")
             messagebox.showerror(self.tr("bank_request_rejected"), self.tr("bank_amount_limit"))
             return
         option = LOAN_OPTIONS[funding_type]
@@ -1882,7 +2298,7 @@ class VirtualStockMarketApp:
         balance = round(amount * (1 + interest_rate), 2)
         user = self.session.user
         if funding_type == "credit" and self.used_credit(user) + balance > self.credit_limit(user):
-            self.trigger_effect("error", "LIMIT", "error")
+            self.trigger_effect("error", "LIMIT")
             messagebox.showerror(self.tr("bank_request_rejected"), self.tr("credit_limit_reached", limit=money(self.credit_limit(user))))
             return
         user["cash"] = round(user.get("cash", 0) + amount, 2)
@@ -1898,8 +2314,41 @@ class VirtualStockMarketApp:
         self.record_transaction(funding_type.upper(), "BANK", amount, 1)
         self.adjust_credit_score(3 if funding_type == "loan" else 1)
         self.status.set(self.tr("bank_funding_approved", amount=money(amount), balance=money(balance)))
-        self.trigger_effect("success", "BANK", "success")
+        self.trigger_effect("success", "BANK")
         self.refresh_all()
+
+    def apply_bank_repayment(self, loan_index: int, amount: float) -> None:
+        user = self.session.user
+        loans = user.get("loans", [])
+        if loan_index < 0 or loan_index >= len(loans):
+            return
+        loan = loans[loan_index]
+        payment = min(amount, loan.get("balance", 0), user.get("cash", 0))
+        if payment <= 0:
+            return
+        user["cash"] = round(user.get("cash", 0) - payment, 2)
+        loan["balance"] = round(loan.get("balance", 0) - payment, 2)
+        if loan["balance"] <= 0:
+            loans.pop(loan_index)
+            self.adjust_credit_score(20)
+        elif payment >= loan.get("minimum_payment", 0):
+            self.adjust_credit_score(5)
+        self.record_transaction("REPAY", "BANK", payment, 1)
+        self.status.set(self.tr("bank_repayment_recorded", amount=money(payment)))
+        self.trigger_effect("success", "PAID")
+        self.refresh_all()
+
+    def repay_next_bank_debt(self) -> None:
+        loans = self.session.user.get("loans", [])
+        loan_index = self.next_due_loan_index(loans)
+        if loan_index is None:
+            return
+        payment = self.suggested_bank_payment(loans[loan_index], cap_to_cash=True)
+        if payment <= 0:
+            self.trigger_effect("error", "CASH")
+            messagebox.showerror(self.tr("repayment_rejected"), self.tr("not_enough_cash_repay"))
+            return
+        self.apply_bank_repayment(loan_index, payment)
 
     def repay_selected_bank_debt(self) -> None:
         if not hasattr(self, "bank_list"):
@@ -1911,66 +2360,54 @@ class VirtualStockMarketApp:
         try:
             amount = float(self.bank_repayment.get())
         except ValueError:
-            self.trigger_effect("error", "ERROR", "error")
+            self.trigger_effect("error", "ERROR")
             messagebox.showerror(self.tr("repayment_rejected"), self.tr("amount_must_be_numeric"))
             return
         if amount <= 0:
-            self.trigger_effect("error", "ERROR", "error")
+            self.trigger_effect("error", "ERROR")
             messagebox.showerror(self.tr("repayment_rejected"), self.tr("amount_must_be_positive"))
             return
         user = self.session.user
         if amount > user.get("cash", 0):
-            self.trigger_effect("error", "CASH", "error")
+            self.trigger_effect("error", "CASH")
             messagebox.showerror(self.tr("repayment_rejected"), self.tr("not_enough_cash_repay"))
             return
-        loan = loans[selection[0]]
-        payment = min(amount, loan.get("balance", 0))
-        user["cash"] = round(user.get("cash", 0) - payment, 2)
-        loan["balance"] = round(loan.get("balance", 0) - payment, 2)
-        if loan["balance"] <= 0:
-            loans.pop(selection[0])
-            self.adjust_credit_score(20)
-        elif payment >= loan.get("minimum_payment", 0):
-            self.adjust_credit_score(5)
-        self.record_transaction("REPAY", "BANK", payment, 1)
-        self.status.set(self.tr("bank_repayment_recorded", amount=money(payment)))
-        self.trigger_effect("success", "PAID", "success")
-        self.refresh_all()
+        self.apply_bank_repayment(selection[0], amount)
 
     def request_margin(self) -> None:
         try:
             amount = float(self.margin_amount.get())
         except ValueError:
-            self.trigger_effect("error", "ERROR", "error")
+            self.trigger_effect("error", "ERROR")
             messagebox.showerror(self.tr("margin_rejected"), self.tr("amount_must_be_numeric"))
             return
         if amount <= 0:
-            self.trigger_effect("error", "ERROR", "error")
+            self.trigger_effect("error", "ERROR")
             messagebox.showerror(self.tr("margin_rejected"), self.tr("amount_must_be_positive"))
             return
         user = self.session.user
         available = self.max_margin_available(user)
         if amount > available:
-            self.trigger_effect("error", "LIMIT", "error")
+            self.trigger_effect("error", "LIMIT")
             messagebox.showerror(self.tr("margin_rejected"), self.tr("margin_limit_reached", limit=money(available)))
             return
         user["cash"] = round(user.get("cash", 0) + amount, 2)
         user["margin_debt"] = round(float(user.get("margin_debt", 0.0) or 0.0) + amount, 2)
         self.record_transaction("MARGIN", "BANK", amount, 1)
         self.status.set(self.tr("margin_approved", amount=money(amount)))
-        self.trigger_effect("risk", "MARGIN", "risk")
+        self.trigger_effect("risk", "MARGIN")
         self.refresh_all()
 
     def repay_margin(self) -> None:
         try:
             amount = float(self.margin_repayment.get())
         except ValueError:
-            self.trigger_effect("error", "ERROR", "error")
+            self.trigger_effect("error", "ERROR")
             messagebox.showerror(self.tr("repayment_rejected"), self.tr("amount_must_be_numeric"))
             return
         user = self.session.user
         if amount <= 0:
-            self.trigger_effect("error", "ERROR", "error")
+            self.trigger_effect("error", "ERROR")
             messagebox.showerror(self.tr("repayment_rejected"), self.tr("amount_must_be_positive"))
             return
         payment = min(amount, user.get("cash", 0), float(user.get("margin_debt", 0.0) or 0.0))
@@ -1980,30 +2417,30 @@ class VirtualStockMarketApp:
         user["margin_debt"] = round(float(user.get("margin_debt", 0.0) or 0.0) - payment, 2)
         self.record_transaction("MARGIN REPAY", "BANK", payment, 1)
         self.status.set(self.tr("margin_repaid", amount=money(payment)))
-        self.trigger_effect("success", "PAID", "success")
+        self.trigger_effect("success", "PAID")
         self.refresh_all()
 
     def short_sell(self) -> None:
         symbol = (self.short_symbol.get().strip().upper() or self.selected_symbol.get())
         item = next((asset_item for asset_item in self.get_assets() if asset_item["symbol"] == symbol), None)
         if not item:
-            self.trigger_effect("error", "SYMBOL", "error")
+            self.trigger_effect("error", "SYMBOL")
             messagebox.showerror(self.tr("short_rejected"), self.tr("unknown_symbol"))
             return
         try:
             quantity = float(self.short_quantity.get())
         except ValueError:
-            self.trigger_effect("error", "ERROR", "error")
+            self.trigger_effect("error", "ERROR")
             messagebox.showerror(self.tr("short_rejected"), self.tr("amount_must_be_numeric"))
             return
         if quantity <= 0:
-            self.trigger_effect("error", "ERROR", "error")
+            self.trigger_effect("error", "ERROR")
             messagebox.showerror(self.tr("short_rejected"), self.tr("amount_must_be_positive"))
             return
         notional = item["price"] * quantity
         equity = self.account_net_worth(self.session.user)
         if equity < notional * SHORT_COLLATERAL_RATE:
-            self.trigger_effect("error", "RISK", "error")
+            self.trigger_effect("error", "RISK")
             messagebox.showerror(self.tr("short_rejected"), self.tr("short_collateral_needed", amount=money(notional * SHORT_COLLATERAL_RATE)))
             return
         position = self.session.user.setdefault("short_positions", {}).get(symbol, {"quantity": 0.0, "entry_price": item["price"]})
@@ -2013,7 +2450,7 @@ class VirtualStockMarketApp:
         self.session.user["cash"] = round(self.session.user.get("cash", 0) + notional, 2)
         self.record_transaction("SHORT", symbol, quantity, item["price"])
         self.status.set(self.tr("short_opened", symbol=symbol, amount=money(notional)))
-        self.trigger_effect("risk", "SHORT", "risk")
+        self.trigger_effect("risk", "SHORT")
         self.refresh_all()
         self.pulse_chart_latest("sell")
 
@@ -2027,12 +2464,12 @@ class VirtualStockMarketApp:
         try:
             quantity = min(float(self.short_quantity.get()), position.get("quantity", 0.0))
         except ValueError:
-            self.trigger_effect("error", "ERROR", "error")
+            self.trigger_effect("error", "ERROR")
             messagebox.showerror(self.tr("short_rejected"), self.tr("amount_must_be_numeric"))
             return
         cost = quantity * item["price"]
         if cost > self.session.user.get("cash", 0):
-            self.trigger_effect("error", "CASH", "error")
+            self.trigger_effect("error", "CASH")
             messagebox.showerror(self.tr("short_rejected"), self.tr("not_enough_cash_repay"))
             return
         self.session.user["cash"] = round(self.session.user.get("cash", 0) - cost, 2)
@@ -2043,7 +2480,7 @@ class VirtualStockMarketApp:
             position["quantity"] = remaining
         self.record_transaction("COVER", symbol, quantity, item["price"])
         self.status.set(self.tr("short_covered", symbol=symbol, amount=money(cost)))
-        self.trigger_effect("success", "COVER", "success")
+        self.trigger_effect("success", "COVER")
         self.refresh_all()
         self.pulse_chart_latest("trade")
 
@@ -2052,13 +2489,13 @@ class VirtualStockMarketApp:
         item = next((asset_item for asset_item in self.get_assets() if asset_item["symbol"] == symbol), None)
         qty = self.session.user.get("portfolio", {}).get(symbol, 0)
         if not item or qty <= 0:
-            self.trigger_effect("error", "HOLD", "error")
+            self.trigger_effect("error", "HOLD")
             messagebox.showerror(self.tr("insurance_rejected"), self.tr("insurance_requires_holding"))
             return
         covered_value = item["price"] * qty
         premium = round(covered_value * INSURANCE_PREMIUM_RATE, 2)
         if premium > self.session.user.get("cash", 0):
-            self.trigger_effect("error", "CASH", "error")
+            self.trigger_effect("error", "CASH")
             messagebox.showerror(self.tr("insurance_rejected"), self.tr("not_enough_cash_repay"))
             return
         expires_ts = time.time() + 7 * 86400
@@ -2073,27 +2510,68 @@ class VirtualStockMarketApp:
         })
         self.record_transaction("INSURANCE", symbol, qty, premium / qty if qty else premium)
         self.status.set(self.tr("insurance_bought", symbol=symbol, amount=money(premium)))
-        self.trigger_effect("success", "HEDGE", "success")
+        self.trigger_effect("success", "HEDGE")
         self.refresh_all()
 
     def refresh_orders(self) -> None:
         if not hasattr(self, "orders_list"):
             return
-        self.orders_list.delete(0, END)
         orders = self.session.user.get("orders", [])
+        selected_order_id = ""
+        selection = self.orders_list.curselection()
+        if selection and selection[0] < len(orders):
+            selected_order_id = self.order_identity(orders[selection[0]])
+        self.orders_list.delete(0, END)
         if not orders:
             self.orders_list.insert(END, self.tr("no_active_orders"))
             return
-        for order in orders:
+        for idx, order in enumerate(orders):
             self.orders_list.insert(
                 END,
                 f"{order.get('created_at', '')}  {order.get('type', ''):<10} {order.get('symbol', ''):<6} "
                 f"{order.get('quantity', 0):>8.3f} target {money(order.get('target_price', 0))}",
             )
+            if selected_order_id and self.order_identity(order) == selected_order_id:
+                self.orders_list.selection_set(idx)
+                self.orders_list.activate(idx)
+                self.orders_list.see(idx)
+
+    def order_identity(self, order: dict) -> str:
+        return (
+            f"{order.get('created_at', '')}|{order.get('type', '')}|{order.get('symbol', '')}|"
+            f"{order.get('quantity', '')}|{order.get('target_price', '')}"
+        )
+
+    def localized_news_title(self, event: dict) -> str:
+        key = event.get("title_key", "")
+        values = event.get("title_values", {})
+        if key:
+            try:
+                if isinstance(values, dict):
+                    return self.tr(key, **values)
+                return self.tr(key)
+            except (KeyError, ValueError):
+                return self.tr(key)
+        return event.get("title") or event.get("message") or self.tr("news")
+
+    def source_reputation_row(self, source: str) -> dict:
+        reputation = self.session.market_data.setdefault("source_reputation", {})
+        return reputation.get(source, {})
+
+    def source_reputation_text(self, event: dict) -> str:
+        source = event.get("source", "Market Desk")
+        row = self.source_reputation_row(source)
+        resolved = int(row.get("resolved", 0) or 0)
+        if not resolved:
+            return self.tr("source_reputation_pending", source=source)
+        helped = int(row.get("helped", 0) or 0)
+        hit_rate = helped / resolved * 100
+        avg_credibility = float(row.get("credibility_total", 0.0) or 0.0) / resolved * 100
+        return self.tr("source_reputation", source=source, hit_rate=hit_rate, helped=helped, resolved=resolved, credibility=avg_credibility)
 
     def normalize_news_event(self, event: dict) -> dict:
         message = event.get("message", "")
-        title = event.get("title") or message or self.tr("news")
+        title = self.localized_news_title(event)
         source = event.get("source") or "Market Desk"
         source_type = event.get("source_type") or "Newswire"
         credibility = event.get("credibility", 0.6)
@@ -2119,31 +2597,102 @@ class VirtualStockMarketApp:
     def refresh_news(self) -> None:
         if not hasattr(self, "news_list"):
             return
+        previous_id = self.selected_news_id
+        selection = self.news_list.curselection()
+        if selection and selection[0] < len(self.visible_news):
+            previous_id = self.news_event_id(self.visible_news[selection[0]])
         self.news_list.delete(0, END)
         news_filter = self.news_filter.get()
+        news_view = self.news_view_from_label(self.news_view.get())
+        search = self.news_search.get().strip().lower()
         feed = self.session.market_data.get("news_feed", [])
-        self.visible_news = [self.normalize_news_event(event) for event in reversed(feed) if news_filter == "All" or event.get("category") == news_filter]
+        self.visible_news = []
+        for event in reversed(feed):
+            normalized = self.normalize_news_event(event)
+            if self.news_matches_filters(normalized, news_filter, news_view, search):
+                self.visible_news.append(normalized)
         if not self.visible_news:
             self.news_list.insert(END, self.tr("no_matching_news"))
+            self.selected_news_id = ""
             self.render_news_article(None)
             return
         self.visible_news = self.visible_news[:140]
+        read_news = set(self.session.user.setdefault("read_news", []))
+        bookmarks = set(self.session.user.setdefault("bookmarked_news", []))
         for event in self.visible_news:
+            event_id = self.news_event_id(event)
+            state = "★" if event_id in bookmarks else "✓" if event_id in read_news else "•"
+            if event.get("breaking"):
+                state = "⚡"
             warning = " !" if event.get("misleading") else ""
-            self.news_list.insert(END, f"{event.get('time', '')}  {event.get('symbol', ''):<6}  {event.get('title', '')}{warning}")
-        self.news_list.selection_set(0)
-        self.render_news_article(self.visible_news[0])
+            self.news_list.insert(END, f"{state} {event.get('time', '')}  {event.get('symbol', ''):<6}  {event.get('title', '')}{warning}")
+        selected_index = 0
+        if previous_id:
+            for idx, event in enumerate(self.visible_news):
+                if self.news_event_id(event) == previous_id:
+                    selected_index = idx
+                    break
+        self.news_list.selection_set(selected_index)
+        self.news_list.activate(selected_index)
+        self.news_list.see(selected_index)
+        selected_event = self.visible_news[selected_index]
+        self.selected_news_id = self.news_event_id(selected_event)
+        self.render_news_article(selected_event)
+
+    def news_matches_filters(self, event: dict, category_filter: str, view_filter: str, search: str) -> bool:
+        if category_filter != "All" and event.get("category") != category_filter:
+            return False
+        event_id = self.news_event_id(event)
+        read_news = set(self.session.user.setdefault("read_news", []))
+        bookmarks = set(self.session.user.setdefault("bookmarked_news", []))
+        if view_filter == "unread" and event_id in read_news:
+            return False
+        if view_filter == "bookmarked" and event_id not in bookmarks:
+            return False
+        if not search:
+            return True
+        haystack = " ".join(
+            str(event.get(key, ""))
+            for key in ("time", "symbol", "category", "title", "message", "source", "source_type", "body", "insight")
+        ).lower()
+        return search in haystack
+
+    def clear_news_search(self) -> None:
+        self.news_search.set("")
+        self.refresh_news()
 
     def on_select_news(self, _event=None) -> None:
         selection = self.news_list.curselection()
         if not selection or selection[0] >= len(self.visible_news):
             return
         event = self.visible_news[selection[0]]
+        self.selected_news_id = self.news_event_id(event)
         self.mark_news_read(event)
         self.render_news_article(event)
 
     def news_event_id(self, event: dict) -> str:
         return f"{event.get('time', '')}|{event.get('symbol', '')}|{event.get('title', event.get('message', ''))}"
+
+    def latest_breaking_news_id(self) -> str:
+        for event in reversed(self.session.market_data.get("news_feed", [])):
+            if event.get("breaking"):
+                return self.news_event_id(event)
+        return ""
+
+    def handle_breaking_news_alerts(self) -> None:
+        latest = None
+        for event in reversed(self.session.market_data.get("news_feed", [])):
+            if event.get("breaking"):
+                latest = self.normalize_news_event(event)
+                break
+        if not latest:
+            return
+        event_id = self.news_event_id(latest)
+        if event_id == self.last_breaking_news_id:
+            return
+        self.last_breaking_news_id = event_id
+        self.status.set(self.tr("breaking_news_alert", title=latest.get("title", "")))
+        self.trigger_effect("risk", "NEWS")
 
     def mark_news_read(self, event: dict) -> None:
         user = self.session.user
@@ -2167,7 +2716,12 @@ class VirtualStockMarketApp:
             self.news_meta.configure(text="")
             self.news_body.configure(text="")
             self.news_insight.configure(text="")
+            self.news_source_reputation.configure(text="")
+            self.news_impact_timeline.configure(text="")
             self.news_select_button.state(["disabled"])
+            if hasattr(self, "news_bookmark_button"):
+                self.news_bookmark_button.state(["disabled"])
+                self.news_unread_button.state(["disabled"])
             self.draw_news_image("empty", None)
             return
         credibility = event.get("credibility", 0.6) * 100
@@ -2177,16 +2731,88 @@ class VirtualStockMarketApp:
             f"{self.tr('symbol')}: {event.get('symbol', 'MARKET')} | "
             f"{self.tr('credibility')}: {credibility:.0f}% | {risk}"
         )
+        if event.get("outcome"):
+            if event.get("outcome") == "pending":
+                meta += f" | {self.tr('impact_outcome')}: {self.tr('pending_impact')}"
+            else:
+                actual = float(event.get("actual_return", 0.0) or 0.0) * 100
+                meta += f" | {self.tr('impact_outcome')}: {self.tr(event.get('outcome', 'mixed'))} ({actual:+.1f}%)"
         self.news_title.configure(text=event.get("title", ""))
         self.news_meta.configure(text=meta)
         self.news_body.configure(text=event.get("body", ""))
         self.news_insight.configure(text=f"{self.tr('investment_insight')}: {event.get('insight', '')}")
+        self.news_source_reputation.configure(text=self.source_reputation_text(event))
+        self.news_impact_timeline.configure(text=self.news_impact_timeline_text(event))
         symbol = event.get("symbol", "")
         if symbol and symbol != "MARKET" and any(item["symbol"] == symbol for item in self.get_assets()):
             self.news_select_button.state(["!disabled"])
         else:
             self.news_select_button.state(["disabled"])
+        self.update_news_action_buttons(event)
         self.draw_news_image(event.get("image_key", "newspaper"), event)
+
+    def news_impact_timeline_text(self, event: dict) -> str:
+        if not event.get("impact_end_tick"):
+            return self.tr("impact_timeline_none")
+        start_tick = event.get("created_tick", "?")
+        end_tick = event.get("impact_end_tick", "?")
+        start_price = money(float(event.get("start_price", 0.0) or 0.0))
+        if event.get("outcome") == "pending":
+            return self.tr("impact_timeline_pending", start_tick=start_tick, end_tick=end_tick, start_price=start_price)
+        end_price = money(float(event.get("end_price", 0.0) or 0.0))
+        actual = float(event.get("actual_return", 0.0) or 0.0) * 100
+        outcome = self.tr(event.get("outcome", "mixed"))
+        return self.tr("impact_timeline_resolved", start_tick=start_tick, end_tick=end_tick, start_price=start_price, end_price=end_price, actual=actual, outcome=outcome)
+
+    def selected_news_event(self) -> dict | None:
+        if not hasattr(self, "news_list"):
+            return None
+        selection = self.news_list.curselection()
+        if not selection or selection[0] >= len(self.visible_news):
+            return None
+        return self.visible_news[selection[0]]
+
+    def update_news_action_buttons(self, event: dict | None) -> None:
+        if not hasattr(self, "news_bookmark_button"):
+            return
+        if not event:
+            self.news_bookmark_button.state(["disabled"])
+            self.news_unread_button.state(["disabled"])
+            return
+        event_id = self.news_event_id(event)
+        bookmarks = set(self.session.user.setdefault("bookmarked_news", []))
+        label_key = "remove_bookmark" if event_id in bookmarks else "bookmark"
+        self.news_bookmark_button.configure(text=self.with_icon("★", label_key))
+        self.news_bookmark_button.state(["!disabled"])
+        self.news_unread_button.state(["!disabled"])
+
+    def toggle_news_bookmark(self) -> None:
+        event = self.selected_news_event()
+        if not event:
+            return
+        event_id = self.news_event_id(event)
+        bookmarks = self.session.user.setdefault("bookmarked_news", [])
+        if event_id in bookmarks:
+            bookmarks.remove(event_id)
+            self.status.set(self.tr("bookmark_removed"))
+        else:
+            bookmarks.append(event_id)
+            del bookmarks[:-200]
+            self.status.set(self.tr("bookmark_saved"))
+        self.session.save()
+        self.refresh_news()
+
+    def mark_selected_news_unread(self) -> None:
+        event = self.selected_news_event()
+        if not event:
+            return
+        event_id = self.news_event_id(event)
+        read_news = self.session.user.setdefault("read_news", [])
+        if event_id in read_news:
+            read_news.remove(event_id)
+            self.session.save()
+        self.status.set(self.tr("marked_unread"))
+        self.refresh_news()
 
     def select_news_asset(self) -> None:
         selection = self.news_list.curselection()
@@ -2209,6 +2835,53 @@ class VirtualStockMarketApp:
             canvas.create_polygon(width / 2 - 22, 62, width / 2 - 22, 102, width / 2 + 20, 82, fill="#ef4444", outline="")
             canvas.create_text(40, 36, anchor="w", text="LIVE HYPE", fill="#fef2f2", font=("Arial", 18, "bold"))
             canvas.create_text(width - 36, 126, anchor="e", text=title, fill="#facc15", font=("Arial", 24, "bold"))
+        elif image_key == "breaking":
+            canvas.create_rectangle(0, 0, width, height, fill="#7f1d1d", outline="")
+            canvas.create_rectangle(20, 24, width - 20, 68, fill="#fef2f2", outline="")
+            canvas.create_text(36, 46, anchor="w", text="BREAKING NEWS", fill="#991b1b", font=("Arial", 24, "bold"))
+            canvas.create_line(32, 104, width - 40, 104, fill="#fca5a5", width=5)
+            canvas.create_polygon(width - 118, 86, width - 64, 86, width - 92, 132, fill="#fbbf24", outline="")
+            canvas.create_text(36, 132, anchor="w", text=title, fill="#fee2e2", font=("Arial", 22, "bold"))
+        elif image_key == "earnings":
+            canvas.create_rectangle(0, 0, width, height, fill="#ecfeff", outline="")
+            canvas.create_rectangle(34, 28, width - 34, 132, fill="#ffffff", outline="#0891b2", width=2)
+            bars = [42, 76, 58, 104, 88]
+            for index, bar_height in enumerate(bars):
+                x = 74 + index * 42
+                canvas.create_rectangle(x, 122 - bar_height, x + 22, 122, fill="#0ea5e9", outline="")
+            canvas.create_line(330, 112, 380, 78, 430, 90, 500, 42, fill="#16a34a", width=4)
+            canvas.create_text(48, 48, anchor="w", text="EARNINGS", fill="#155e75", font=("Arial", 20, "bold"))
+        elif image_key == "lawsuit":
+            canvas.create_rectangle(0, 0, width, height, fill="#f8fafc", outline="")
+            canvas.create_rectangle(42, 106, 180, 124, fill="#78350f", outline="")
+            canvas.create_polygon(74, 40, 146, 40, 160, 106, 60, 106, fill="#fbbf24", outline="#92400e", width=2)
+            canvas.create_line(110, 40, 110, 106, fill="#92400e", width=3)
+            canvas.create_line(78, 62, 142, 62, fill="#92400e", width=3)
+            canvas.create_text(230, 50, anchor="w", text="LEGAL RISK", fill="#92400e", font=("Arial", 22, "bold"))
+            canvas.create_text(230, 92, anchor="w", text=title, fill="#0f172a", font=("Arial", 18, "bold"))
+        elif image_key == "crypto":
+            canvas.create_rectangle(0, 0, width, height, fill="#111827", outline="")
+            canvas.create_oval(46, 28, 152, 134, fill="#f59e0b", outline="#fde68a", width=4)
+            canvas.create_text(99, 82, text="₿", fill="#111827", font=("Arial", 46, "bold"))
+            for x in [220, 278, 336, 394, 452]:
+                canvas.create_oval(x, 64, x + 12, 76, fill="#38bdf8", outline="")
+                canvas.create_line(x + 12, 70, x + 46, 70, fill="#38bdf8", width=2)
+            canvas.create_text(218, 38, anchor="w", text="DIGITAL ASSETS", fill="#bfdbfe", font=("Arial", 20, "bold"))
+        elif image_key == "fund":
+            canvas.create_rectangle(0, 0, width, height, fill="#f0fdf4", outline="")
+            canvas.create_rectangle(42, 110, 100, 130, fill="#16a34a", outline="")
+            canvas.create_rectangle(124, 82, 182, 130, fill="#22c55e", outline="")
+            canvas.create_rectangle(206, 58, 264, 130, fill="#4ade80", outline="")
+            canvas.create_rectangle(288, 34, 346, 130, fill="#86efac", outline="")
+            canvas.create_line(390, 124, width - 52, 46, fill="#15803d", width=4)
+            canvas.create_text(42, 36, anchor="w", text="FUND FLOW", fill="#166534", font=("Arial", 22, "bold"))
+        elif image_key == "rates":
+            canvas.create_rectangle(0, 0, width, height, fill="#eff6ff", outline="")
+            canvas.create_line(52, 124, width - 54, 124, fill="#1e3a8a", width=3)
+            canvas.create_line(52, 124, 52, 34, fill="#1e3a8a", width=3)
+            canvas.create_line(72, 104, 160, 88, 248, 98, 336, 62, 448, 54, fill="#2563eb", width=4)
+            canvas.create_text(64, 44, anchor="w", text="RATES / MACRO", fill="#1e3a8a", font=("Arial", 20, "bold"))
+            canvas.create_text(width - 54, 92, anchor="e", text="%", fill="#60a5fa", font=("Arial", 48, "bold"))
         elif image_key == "space":
             canvas.create_rectangle(0, 0, width, height, fill="#020617", outline="")
             for x, y in [(48, 34), (116, 76), (210, 28), (340, 52), (470, 30), (520, 96)]:
@@ -2294,9 +2967,11 @@ class VirtualStockMarketApp:
         chart.create_line(*points, fill="#22c55e" if values[-1] >= values[0] else "#ef4444", width=3, smooth=True)
 
     def on_select_asset(self, _event=None) -> None:
+        if self.refreshing_market_list:
+            return
         source = _event.widget if _event else self.market_list
         selection = source.curselection()
-        if not selection:
+        if not selection or selection[0] >= len(self.visible_assets):
             return
         self.market_list.selection_clear(0, END)
         self.market_change_list.selection_clear(0, END)
@@ -2338,18 +3013,18 @@ class VirtualStockMarketApp:
         symbol = self.order_symbol.get().strip().upper() or self.selected_symbol.get()
         item = next((asset_item for asset_item in self.get_assets() if asset_item["symbol"] == symbol), None)
         if not item:
-            self.trigger_effect("error", "ERROR", "error")
+            self.trigger_effect("error", "ERROR")
             messagebox.showerror("Order rejected", "Unknown symbol.")
             return
         try:
             quantity = float(self.order_quantity.get())
             target_price = float(self.order_price.get())
         except ValueError:
-            self.trigger_effect("error", "ERROR", "error")
+            self.trigger_effect("error", "ERROR")
             messagebox.showerror("Order rejected", "Quantity and target price must be numeric.")
             return
         if quantity <= 0 or target_price <= 0:
-            self.trigger_effect("error", "ERROR", "error")
+            self.trigger_effect("error", "ERROR")
             messagebox.showerror("Order rejected", "Quantity and target price must be greater than zero.")
             return
         order = {
@@ -2362,7 +3037,7 @@ class VirtualStockMarketApp:
         self.session.user.setdefault("orders", []).append(order)
         self.order_symbol.set(symbol)
         self.status.set(f"Placed {order['type']} for {symbol}.")
-        self.trigger_effect("order", "ORDER", "order")
+        self.trigger_effect("order", "ORDER")
         self.refresh_all()
 
     def cancel_selected_order(self) -> None:
@@ -2374,7 +3049,7 @@ class VirtualStockMarketApp:
             return
         orders.pop(selection[0])
         self.status.set("Order cancelled.")
-        self.trigger_effect("order", "CANCEL", "order")
+        self.trigger_effect("order", "CANCEL")
         self.refresh_all()
 
     def process_orders(self) -> int:
@@ -2422,7 +3097,7 @@ class VirtualStockMarketApp:
         user["orders"] = remaining
         if triggered:
             self.status.set(f"{triggered} order(s) triggered.")
-            self.trigger_effect("order", f"{triggered} ORDER", "order")
+            self.trigger_effect("order", f"{triggered} ORDER")
         return triggered
 
     def render_selected(self) -> None:
@@ -2435,10 +3110,24 @@ class VirtualStockMarketApp:
             return
         self.asset_title.configure(text=f"{item['symbol']} - {item['name']}")
         owned = self.session.user.get("portfolio", {}).get(item["symbol"], 0)
+        financials = item.get("financials", {})
+        dividend_text = ""
+        if item.get("category") in {"Stock", "Fund"}:
+            dividend_text = (
+                f" | {self.tr('dividend_yield')} {float(item.get('dividend_yield', 0) or 0) * 100:.2f}% "
+                f"| {self.tr('ex_dividend_tick')} {item.get('next_dividend_tick', 0)}"
+            )
         self.asset_meta.configure(
             text=(
                 f"{item['category']} | {item.get('sector', 'General')} | "
                 f"Price {money(item['price'])} | Owned {owned:.3f} | "
+                f"{self.tr('risk_rating')}: {financials.get('risk_rating', 'Medium')} | "
+                f"{self.tr('sector_outlook')}: {financials.get('sector_outlook', 'Stable')}{dividend_text}\n"
+                f"{self.tr('revenue')}: {money(financials.get('revenue', 0))} | "
+                f"{self.tr('profit_margin')}: {float(financials.get('profit_margin', 0) or 0) * 100:.1f}% | "
+                f"{self.tr('growth')}: {float(financials.get('growth', 0) or 0) * 100:.1f}% | "
+                f"{self.tr('debt_ratio')}: {float(financials.get('debt_ratio', 0) or 0) * 100:.1f}% | "
+                f"{self.tr('earnings')}: {financials.get('last_earnings', 'in line')} ({financials.get('earnings_in_ticks', '?')} {self.tr('ticks')})\n"
                 f"News: {item.get('news', 'Quiet trading')}"
             )
         )
@@ -2555,11 +3244,11 @@ class VirtualStockMarketApp:
         try:
             qty = float(self.quantity.get())
         except ValueError:
-            self.trigger_effect("error", "ERROR", "error")
+            self.trigger_effect("error", "ERROR")
             messagebox.showerror("Invalid quantity", "Enter a numeric quantity.")
             return None
         if qty <= 0:
-            self.trigger_effect("error", "ERROR", "error")
+            self.trigger_effect("error", "ERROR")
             messagebox.showerror("Invalid quantity", "Quantity must be greater than zero.")
             return None
         return qty
@@ -2572,7 +3261,7 @@ class VirtualStockMarketApp:
         cost = item["price"] * qty
         user = self.session.user
         if cost > user["cash"]:
-            self.trigger_effect("error", "CASH", "error")
+            self.trigger_effect("error", "CASH")
             messagebox.showerror("Not enough cash", f"Need {money(cost)}, but you have {money(user['cash'])}.")
             return
         user["cash"] = round(user["cash"] - cost, 2)
@@ -2580,7 +3269,7 @@ class VirtualStockMarketApp:
         self.record_transaction("BUY", item["symbol"], qty, item["price"])
         self.status.set(f"Bought {qty:.3f} {item['symbol']} for {money(cost)}.")
         self.refresh_all()
-        self.trigger_effect("trade", "BUY", "trade")
+        self.trigger_effect("trade", "BUY")
         self.pulse_chart_latest("trade")
 
     def sell_selected(self) -> None:
@@ -2591,7 +3280,7 @@ class VirtualStockMarketApp:
         user = self.session.user
         owned = user.get("portfolio", {}).get(item["symbol"], 0)
         if qty > owned:
-            self.trigger_effect("error", "HOLD", "error")
+            self.trigger_effect("error", "HOLD")
             messagebox.showerror("Not enough holdings", f"You own {owned:.3f} {item['symbol']}.")
             return
         proceeds = item["price"] * qty
@@ -2604,7 +3293,7 @@ class VirtualStockMarketApp:
         self.record_transaction("SELL", item["symbol"], qty, item["price"])
         self.status.set(f"Sold {qty:.3f} {item['symbol']} for {money(proceeds)}.")
         self.refresh_all()
-        self.trigger_effect("sell", "SELL", "sell")
+        self.trigger_effect("sell", "SELL")
         self.pulse_chart_latest("sell")
 
     def record_transaction(self, action: str, symbol: str, qty: float, price: float) -> None:
@@ -2621,12 +3310,18 @@ class VirtualStockMarketApp:
 
     def process_dividends(self) -> None:
         user = self.session.user
-        for symbol, qty in list(user.get("portfolio", {}).items()):
-            item = next((asset_item for asset_item in self.get_assets() if asset_item["symbol"] == symbol), None)
-            if not item or item.get("category") not in {"Stock", "Fund"}:
+        current_tick = int(self.session.market_data.get("tick_count", 0) or 0)
+        for item in self.get_assets():
+            if item.get("category") not in {"Stock", "Fund"}:
                 continue
-            if time.time_ns() % 97 == 0:
-                dividend = round(item["price"] * qty * 0.003, 2)
+            next_tick = int(item.get("next_dividend_tick", 0) or 0)
+            if not next_tick or current_tick < next_tick:
+                continue
+            symbol = item.get("symbol", "")
+            qty = float(user.get("portfolio", {}).get(symbol, 0) or 0)
+            rate = max(0.001, float(item.get("dividend_yield", 0.0) or 0.0) / 4)
+            if qty > 0:
+                dividend = round(item["price"] * qty * rate, 2)
                 if dividend > 0:
                     user["cash"] = round(user.get("cash", 0) + dividend, 2)
                     self.record_transaction("DIVIDEND", symbol, qty, dividend / qty if qty else dividend)
@@ -2635,9 +3330,19 @@ class VirtualStockMarketApp:
                             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
                             "symbol": symbol,
                             "category": item.get("category", "Stock"),
-                            "message": f"{symbol} paid a small dividend to holders.",
+                            "message": f"{symbol} paid a scheduled dividend to holders.",
+                            "title": f"{symbol} reaches ex-dividend date",
+                            "body": f"{item.get('name', symbol)} paid holders a scheduled dividend based on its current dividend yield.",
+                            "source": "Market Desk",
+                            "source_type": "Newswire",
+                            "credibility": 0.9,
+                            "impact": "mixed",
+                            "insight": "Dividend income improves cash, but the asset price can still move independently.",
+                            "image_key": "newspaper",
+                            "misleading": False,
                         }
                     )
+            item["next_dividend_tick"] = current_tick + int(item.get("dividend_interval_ticks", 60) or 60)
 
     def tick(self) -> None:
         advance_market(self.session.market_data, ticks=1)
@@ -2651,6 +3356,7 @@ class VirtualStockMarketApp:
         if not triggered:
             self.trigger_effect("trade", "TICK")
         self.pulse_chart_latest("trade")
+        self.handle_breaking_news_alerts()
 
     def start_live_updates(self) -> None:
         self.live_updates_enabled = True
@@ -2670,11 +3376,11 @@ class VirtualStockMarketApp:
         if self.live_updates_enabled:
             self.stop_live_updates()
             self.status.set("Market updates frozen. Manual ticks still work.")
-            self.trigger_effect("order", "PAUSE", "order")
+            self.trigger_effect("order", "PAUSE")
         else:
             self.start_live_updates()
             self.status.set(f"Market updates resumed at {self.current_interval_seconds():.1f}s per tick.")
-            self.trigger_effect("success", "LIVE", "success")
+            self.trigger_effect("success", "LIVE")
 
     def apply_live_speed(self) -> None:
         if not self.show_speed_controls():
@@ -2691,7 +3397,7 @@ class VirtualStockMarketApp:
                 self.live_update_job = None
             self.schedule_live_update()
         self.status.set(f"Market step speed set to {interval:.1f} seconds.")
-        self.trigger_effect("success", "SPEED", "success")
+        self.trigger_effect("success", "SPEED")
 
     def current_interval_seconds(self, show_errors: bool = True) -> float:
         if self.current_trading_mode() == "realistic":
@@ -2728,4 +3434,5 @@ class VirtualStockMarketApp:
         self.refresh_all()
         if triggered:
             self.pulse_chart_latest("trade")
+        self.handle_breaking_news_alerts()
         self.schedule_live_update()

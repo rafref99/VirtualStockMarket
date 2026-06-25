@@ -12,40 +12,27 @@ Most original app-level tasks are now implemented. Remaining work is release pol
 - Added category-specific market price ceilings and save-file price normalization.
 - Added 50 more achievement milestones.
 - Completed the Bank And Risk pass with credit limits, minimum payments, due dates, late/default penalties, margin trading, short selling, liquidation risk, credit scores, and insurance hedges.
-- Added graphical pulse/confetti effects and optional sound cues for trades, orders, achievements, risk events, and manual ticks.
+- Added graphical pulse/confetti effects for trades, orders, achievements, risk events, and manual ticks.
+- Simplified the Bank tab with quick funding, next-due repayment, and optional advanced controls.
+- Preserved selected market, news, portfolio, bank, and order items across live refreshes.
+- Added news search, read/unread filtering, and article bookmarks.
+- Added full save import/export plus reset-market and reset-account controls in Settings.
+- Added macro indexes, sector cycles, company financial profiles, scheduled dividends, news impact outcomes, daily quests with rewards, and compressed offline simulation.
+- Finished the News pass with source reputation history, breaking-news alerts, richer article images, and translated generated headlines.
 
 ## Gameplay
 
-- Add daily quests and challenge modes.
+- Add challenge modes.
 - Add trading goals with rewards.
-- Add company profiles with financials, risk rating, sector outlook, and earnings reports.
-- Add dividends with ex-dividend dates instead of random payouts.
 - Add IPOs, delistings, bankruptcies, mergers, and stock splits.
 - Add difficulty presets with different starting cash, volatility, and loan limits.
 
 ## Market Simulation
 
-- Make news impact more realistic by linking each story to sectors, assets, duration, delayed reversals, and confidence.
-- Add inflation, interest rates, unemployment, oil price, and currency indexes.
-- Add sector cycles so tech, energy, finance, crypto, FNTs, commodities, and funds behave differently.
 - Add market hours or weekend behavior for realistic mode.
-- Add smarter offline simulation that compresses long absences without generating excessive ticks.
-
-## News
-
-- Add source reputation history so users can learn which sources are reliable.
-- Add article bookmarks.
-- Add read/unread state.
-- Add news search.
-- Add an impact timeline showing whether a news prediction helped or misled.
-- Add breaking-news alerts for high-impact events.
-- Add richer generated article images or reusable image assets.
-- Expand market event headline translations beyond the core UI labels.
 
 ## Data And Quality
 
-- Add import/export save files.
-- Add reset-market and reset-account options.
 - Add automated tests for trading, loans, orders, news, and offline simulation.
 - Add a small migration system for old `data/*.json` files.
 - Continue moving large UI sections into smaller view classes if the interface grows further.
